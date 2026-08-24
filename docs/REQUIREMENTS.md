@@ -89,3 +89,15 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
 - Never crash the workflow by default (`fail_on_error: false` → log + exit 0).
 - Cost-conscious: caps on patch size, file count, retries.
 - Fast: single LLM call per chunk; no per-file round trips.
+
+## Environment
+
+- **Development**: Nix flake (`nix develop` / direnv `.envrc`) provides Node 24
+  (matching the action's `runs.using: node24`) plus formatting tools. npm
+  devDependencies (typescript, vitest, ncc) are installed automatically on
+  first shell entry.
+- **CI / runners**: must work on **self-hosted runners**, not just GitHub-hosted.
+  Example workflows pin the Node version with `actions/setup-node` and do not
+  rely on tools preinstalled on GitHub-hosted runners (no `curl`-to-latest,
+  no `gh` CLI, no container-only features). The action's only runtime
+  dependency is the Node 24 interpreter provided by the runner.

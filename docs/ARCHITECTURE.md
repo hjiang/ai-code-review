@@ -2,15 +2,37 @@
 
 ## Stack
 
-- **Runtime**: Node 20 (GitHub-hosted runners have it preinstalled).
+- **Runtime**: `runs.using: node24` - the Node 24 interpreter is provisioned
+  by the Actions runner itself (GitHub-hosted *and* self-hosted runners both
+  auto-provision the declared node runtime externals). No other runtime deps.
 - **Language**: TypeScript, strict mode.
 - **Build**: `@vercel/ncc` bundles `src/index.ts` -> single-file `dist/index.js`
   committed to the repo (standard for composite/marketplace actions).
 - **Tests**: `vitest` with mocked `fetch` and mocked `@actions/github`.
+- **Dev environment**: Nix flake (`nix develop`, or direnv via `.envrc`)
+  providing Node 24 pinned to the same major version as `runs.using`, so local
+  builds/tests exercise the same runtime as the runner. npm devDependencies
+  are installed automatically on first shell entry.
 - **Deps (runtime, minimal)**:
   - `@actions/core`, `@actions/github` (Octokit).
-  - Nothing else. LLM calls use **native `fetch`** - no OpenAI/Anthropic SDK,
-    so every compatible provider works without code changes.
+  - Nothing else. LLM calls use **native `fetch`** (available in Node >= 18) -
+    no OpenAI/Anthropic SDK, so every compatible provider works without code
+    changes. No dependency on `gh` CLI or anything outside the action bundle.
+
+## Runner compatibility (self-hosted)
+
+- The action is a pure `node24` JavaScript action: it runs anywhere the
+  Actions runner runs (Linux/macOS/Windows, ARM, containers, ephemeral or
+  persistent self-hosted runners).
+- Example workflows use `actions/setup-node@v4` with an explicit
+  `node-version: 24` before `uses: ./` - this keeps the job's Node consistent
+  on runners with odd default toolchains and costs nothing on GitHub-hosted
+  runners (`cache: npm` is disabled because `node_modules` is not used at
+  runtime; `dist/` is committed).
+- The workflows never shell out to `gh`, `curl`, `jq`, etc. - all GitHub API
+  access goes through Octokit, all LLM access through native `fetch`.
+- Self-hosted runners with egress restrictions need network access to:
+  `api.github.com` (or the GHES API URL) and the configured LLM `base_url`.
 
 ## Repository layout
 

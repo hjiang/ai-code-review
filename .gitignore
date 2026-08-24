@@ -1,0 +1,5 @@
+node_modules/
+coverage/
+.direnv/
+.envrc.local
+*.tsbuildinfo

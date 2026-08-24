@@ -19,12 +19,22 @@ two modes, then wiring, then packaging.
    - `tsconfig.json` (strict, ES2022, NodeNext, `outDir` unused - ncc bundles)
    - `vitest.config.ts`, `.gitignore` (`node_modules`, coverage)
    - `action.yml` with all inputs/outputs from REQUIREMENTS (see §action.yml below)
-2. `npm i @actions/core @actions/github && npm i -D typescript vitest @vercel/ncc @types/node`
+   - **`flake.nix` + `.envrc`** (already created in repo root):
+     - flake exposes `devShells.default` with `nodejs_24` (kept in sync with
+       `runs.using: node24`) + `nixfmt-rfc-style`; shellHook runs `npm install`
+       on first enter.
+     - `.envrc`: `use flake` + `watch_file package.json flake.nix`.
+     - Verify with `direnv allow && nix develop -c bash -c 'node --version'`
+       (must print v24.x).
+2. `npm install` (inside the nix shell) - installs `@actions/core`,
+   `@actions/github`, and dev deps `typescript vitest @vercel/ncc @types/node`.
 3. `src/index.ts` stub: `console.log('ok')`. Verify `npm run build` produces
-   `dist/index.js`.
-4. Commit: `chore: scaffold typescript action`
+   `dist/index.js` **inside the nix shell** (all further commands assume
+   `nix develop` / an allowed direnv).
+4. Commit: `chore: scaffold typescript action with nix devshell`
 
-**Done when**: `npm test` (0 tests) and `npm run build` both succeed.
+**Done when**: `npm test` (0 tests) and `npm run build` both succeed inside
+`nix develop`, and `node --version` is v24.x there.
 
 ---
 
@@ -280,13 +290,19 @@ outputs:
   review_comment_count: { description: 'Number of inline comments posted' }
   files_reviewed:      { description: 'Number of files reviewed' }
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/index.js'
 ```
 
 ---
 
 ## Phase 7: Example workflows + README
+
+> **Self-hosted runner policy**: workflows must not assume GitHub-hosted
+> runner conveniences. Pin Node with `actions/setup-node` (explicit version,
+> no `cache: npm` since nothing is installed at runtime), keep using
+> `actions/checkout@v4`, and shell out to nothing. All GitHub access via
+> Octokit inside the action; all LLM access via native `fetch`.
 
 ### 7.1 `.github/workflows/ai-summary.yml`
 
@@ -303,9 +319,12 @@ concurrency:
   cancel-in-progress: false
 jobs:
   summary:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest   # change to your self-hosted label, e.g. runs-on: [self-hosted, linux]
     steps:
-      - uses: actions/checkout@v4   # only so the local action resolves; not needed at runtime
+      - uses: actions/checkout@v4      # required to resolve the local action
+      - uses: actions/setup-node@v4    # pin Node on self-hosted runners
+        with:
+          node-version: 24
       - uses: ./
         with:
           mode: summary
@@ -342,9 +361,12 @@ jobs:
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
        startsWith(github.event.comment.body, '/review'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest   # change to your self-hosted label as needed
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - uses: ./
         with:
           mode: review
@@ -354,21 +376,40 @@ jobs:
           model: ${{ vars.LLM_MODEL }}
 ```
 
-Note: for `issue_comment` from forks, `github.token` is read-only — document
+Note: for `issue_comment` from forks, `github.token` is read-only - document
 using a PAT/App token in README (known GitHub limitation, same as Copilot).
 
-### 7.3 `README.md`
+### 7.3 Self-hosted runner notes (README section)
+
+- The action is a pure `node24` JavaScript action - works on any runner the
+  Actions runner software supports (Linux/macOS/Windows, ARM64, containers).
+- `actions/setup-node@v4` pins Node 24 before `uses: ./` for runners whose
+  default toolchain differs; the runner-provided node24 runtime executes the
+  action itself.
+- **Self-hosted runner requirement**: `runs.using: node24` needs the node24
+  external on the runner - the Actions runner provisions it automatically
+  after install/`config.sh`; on minimal setups run
+  `./bin/installExternalDeps` from the runner directory once.
+- Network egress required: `api.github.com` (or GHES URL) + the LLM `base_url`.
+- No Docker required, no `gh` CLI, no preinstalled tooling beyond the runner
+  software + Node runtime.
+
+### 7.4 `README.md`
 
 What it does, animated demo GIF placeholder, quickstart (both workflows),
 provider config table (OpenAI / Anthropic / OpenRouter / DeepSeek / Groq /
 Together / Ollama / vLLM base URLs + example models), inputs reference,
-self-hosted note, fork limitation, license (MIT).
+**self-hosted runner section (7.3)**, local development section
+(`nix develop` / direnv; `npm test`, `npm run build`), fork limitation,
+license (MIT).
 
 ---
 
 ## Phase 8: Packaging & verification
 
-1. `npm run typecheck && npm test && npm run build` all green.
+1. Inside `nix develop` (or with direnv allowed): `npm run typecheck && npm test
+   && npm run build` all green. Also verify a clean-shell build:
+   `nix develop -c bash -c 'npm ci --ignore-scripts && npm test && npm run build'`.
 2. Commit `dist/index.js`.
 3. **Live smoke test**: create a test repo, add a PR with an intentionally
    buggy file (e.g., SQL string concat injection + off-by-one), wire real
@@ -378,7 +419,10 @@ self-hosted note, fork limitation, license (MIT).
      object;
    - inline comments land on correct lines;
    - draft PR skipped.
-4. Tag `v0.1.0`.
+4. **Self-hosted smoke test**: run the same job once on a self-hosted runner
+   (e.g. `runs-on: [self-hosted, linux]`) to prove no GitHub-hosted-only
+   assumptions (setup-node path, node24 externals, egress).
+5. Tag `v0.1.0`.
 
 ---
 
@@ -392,6 +436,8 @@ self-hosted note, fork limitation, license (MIT).
 | Bot replies to own `/review` | author check in context.ts (Phase 3.3) |
 | Huge diffs burn tokens | chunk cap + file cap + per-file truncation |
 | Fork PRs can't be reviewed with default token | documented; recommend PAT or GitHub App for public repos |
+| Self-hosted runner missing node24 runtime | README self-hosted section: runner auto-provisions externals; fallback `./bin/installExternalDeps`; setup-node pins toolchain |
+| Self-hosted runner behind egress firewall | README lists required endpoints: GitHub API + LLM base_url |
 | Anthropic base_url already contains `/v1` | normalize: strip trailing `/`, ensure openai path appends `/chat/completions` and anthropic appends `/v1/messages` idempotently (add tests for both `…/v1` and bare hosts) |
 
 ## Definition of done

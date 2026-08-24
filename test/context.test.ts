@@ -92,8 +92,13 @@ describe('loadContext', () => {
         body: 'B'
       }
     };
-    const ctx = loadContext('pull_request', payload, reader(), 'bot');
-    expect(ctx).toMatchObject({ owner: 'owner', repo: 'repo', prNumber: 7, botLogin: 'bot' });
+    const ctx = loadContext('pull_request', payload, reader(), 'github-actions[bot]');
+    expect(ctx).toMatchObject({
+      owner: 'owner',
+      repo: 'repo',
+      prNumber: 7,
+      botLogin: 'github-actions[bot]'
+    });
     expect(ctx?.issueComment).toBeUndefined();
   });
 
@@ -103,14 +108,15 @@ describe('loadContext', () => {
       issue: { number: 12, pull_request: { url: 'x' } },
       comment: { body: '/review please', user: { login: 'alice' } }
     };
-    const ctx = loadContext('issue_comment', payload, reader(), 'bot');
+    const ctx = loadContext('issue_comment', payload, reader(), 'github-actions[bot]');
     expect(ctx?.prNumber).toBe(12);
     expect(ctx?.issueComment).toEqual({ author: 'alice', body: '/review please' });
+    expect(ctx?.botLogin).toBe('github-actions[bot]');
   });
 
   it('returns null for a comment on a plain issue (not a PR)', () => {
     const payload = { ...basePayload, issue: { number: 5 }, comment: { body: '/review', user: { login: 'alice' } } };
-    expect(loadContext('issue_comment', payload, reader(), 'bot')).toBeNull();
+    expect(loadContext('issue_comment', payload, reader(), 'github-actions[bot]')).toBeNull();
   });
 
   it('returns null when the comment does not start with the trigger', () => {
@@ -119,24 +125,40 @@ describe('loadContext', () => {
       issue: { number: 12, pull_request: { url: 'x' } },
       comment: { body: 'hello', user: { login: 'alice' } }
     };
-    expect(loadContext('issue_comment', payload, reader(), 'bot')).toBeNull();
+    expect(loadContext('issue_comment', payload, reader(), 'github-actions[bot]')).toBeNull();
   });
 
   it('returns null when the bot comments on its own PR (loop guard)', () => {
     const payload = {
       ...basePayload,
       issue: { number: 12, pull_request: { url: 'x' } },
-      comment: { body: '/review', user: { login: 'Bot' } }
+      comment: { body: '/review', user: { login: 'github-actions[bot]' } }
     };
-    expect(loadContext('issue_comment', payload, reader(), 'bot')).toBeNull();
+    expect(loadContext('issue_comment', payload, reader(), 'github-actions[bot]')).toBeNull();
+  });
+
+  it('does NOT drop a human /review comment even when the event actor matches the author', () => {
+    // Regression: the loop guard must compare the comment author against the
+    // TOKEN identity (botLogin), never against github.context.actor - on
+    // issue_comment events the actor IS the comment author, so an actor-based
+    // guard would silently drop every human /review comment (FR-R1).
+    const payload = {
+      ...basePayload,
+      issue: { number: 12, pull_request: { url: 'x' } },
+      comment: { body: '/review', user: { login: 'alice' } }
+    };
+    const ctx = loadContext('issue_comment', payload, reader(), 'github-actions[bot]');
+    expect(ctx).not.toBeNull();
+    expect(ctx?.issueComment?.author).toBe('alice');
   });
 
   it('derives a workflow_dispatch context from the pr_number input', () => {
-    const ctx = loadContext('workflow_dispatch', basePayload, reader({ pr_number: '99' }), 'bot');
+    const ctx = loadContext('workflow_dispatch', basePayload, reader({ pr_number: '99' }), 'github-actions[bot]');
     expect(ctx?.prNumber).toBe(99);
+    expect(ctx?.botLogin).toBe('github-actions[bot]');
   });
 
   it('throws on workflow_dispatch without a valid pr_number', () => {
-    expect(() => loadContext('workflow_dispatch', basePayload, reader(), 'bot')).toThrow(/pr_number/i);
+    expect(() => loadContext('workflow_dispatch', basePayload, reader(), 'github-actions[bot]')).toThrow(/pr_number/i);
   });
 });

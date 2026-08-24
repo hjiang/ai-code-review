@@ -53,7 +53,8 @@ export function filterFiles(files: PrFile[], opts: FilterOptions): FilterResult 
   const kept: PrFile[] = [];
   const skipped: { file: string; reason: string }[] = [];
 
-  for (const f of files) {
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
     if (opts.mode === 'review' && f.status === 'removed') {
       skipped.push({ file: f.filename, reason: 'removed file (inline review only)' });
       continue;
@@ -70,13 +71,13 @@ export function filterFiles(files: PrFile[], opts: FilterOptions): FilterResult 
       skipped.push({ file: f.filename, reason: `patch too large (>${maxPatchChars} chars)` });
       continue;
     }
-    kept.push(f);
     if (kept.length >= maxFiles) {
-      for (const rest of files.slice(files.indexOf(f) + 1)) {
-        skipped.push({ file: rest.filename, reason: 'file count limit reached' });
+      for (let j = i; j < files.length; j++) {
+        skipped.push({ file: files[j].filename, reason: 'file count limit reached' });
       }
       break;
     }
+    kept.push(f);
   }
   return { kept, skipped };
 }

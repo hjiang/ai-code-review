@@ -31743,7 +31743,6 @@ class HttpError extends Error {
  */
 
 
-const TIMEOUT_MS = 5 * 60 * 1000;
 /** Extract the assistant text from an OpenAI-shaped response. */
 function extractText(data) {
     const choice = data.choices?.[0];
@@ -31760,10 +31759,11 @@ function isResponseFormatError(status, body) {
  * POST `{base}/chat/completions` and return the assistant text.
  * When `jsonMode` is `auto`, sends `response_format: {type:'json_object'}` and
  * retries once without it if the endpoint rejects the field (common on
- * third-party/self-hosted gateways). Throws `HttpError` on other non-2xx
+ * third-party/self-hosted gateways). `timeoutMs` is the remaining budget for
+ * this attempt (shared total deadline). Throws `HttpError` on other non-2xx
  * responses.
  */
-async function openaiChat(cfg, messages, jsonMode) {
+async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
     const url = buildOpenAiUrl(cfg.baseUrl);
     const headers = {
         authorization: `Bearer ${cfg.apiKey}`,
@@ -31781,7 +31781,7 @@ async function openaiChat(cfg, messages, jsonMode) {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(TIMEOUT_MS)
+        signal: AbortSignal.timeout(timeoutMs)
     });
     let res = await doFetch();
     let errorText = null;
@@ -31805,7 +31805,6 @@ async function openaiChat(cfg, messages, jsonMode) {
  */
 
 
-const anthropic_TIMEOUT_MS = 5 * 60 * 1000;
 const ANTHROPIC_VERSION = '2023-06-01';
 function anthropic_extractText(data) {
     const block = data.content?.find((b) => b.type === 'text');
@@ -31816,10 +31815,11 @@ function anthropic_extractText(data) {
 }
 /**
  * POST `{base}/v1/messages`. System messages are moved into the `system`
- * field (not part of `messages`), as required by the Anthropic API. Throws
+ * field (not part of `messages`), as required by the Anthropic API. `timeoutMs`
+ * is the remaining budget for this attempt (shared total deadline). Throws
  * `HttpError` on non-2xx responses.
  */
-async function anthropicChat(cfg, messages) {
+async function anthropicChat(cfg, messages, timeoutMs) {
     const url = buildAnthropicUrl(cfg.baseUrl);
     const system = messages
         .filter((m) => m.role === 'system')
@@ -31844,7 +31844,7 @@ async function anthropicChat(cfg, messages) {
             'content-type': 'application/json'
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(anthropic_TIMEOUT_MS)
+        signal: AbortSignal.timeout(timeoutMs)
     });
     if (!res.ok) {
         throw new HttpError(res.status, (await res.text()).slice(0, 500));
@@ -31909,6 +31909,8 @@ function sleep(ms) {
 
 const MAX_HTTP_ATTEMPTS = 3;
 const MAX_PARSE_ATTEMPTS = 2;
+/** Total budget for one LLM request including all HTTP retries and backoff. */
+const TOTAL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Resolve the effective provider from an explicit input + base URL. */
 function resolveProvider(input, baseUrl) {
     if (input === 'openai' || input === 'anthropic')
@@ -31917,22 +31919,31 @@ function resolveProvider(input, baseUrl) {
         return 'anthropic';
     return 'openai';
 }
-async function chatOnce(cfg, messages, jsonMode) {
+async function chatOnce(cfg, messages, jsonMode, timeoutMs) {
     return cfg.provider === 'anthropic'
-        ? anthropicChat(cfg, messages)
-        : openaiChat(cfg, messages, jsonMode);
+        ? anthropicChat(cfg, messages, timeoutMs)
+        : openaiChat(cfg, messages, jsonMode, timeoutMs);
 }
 function isRetryable(err) {
     if (err instanceof HttpError)
         return err.status === 429 || err.status >= 500;
     return !(err instanceof LLMError); // transient network/parse-agnostic errors
 }
-/** One HTTP round-trip with backoff retries; returns the raw reply text. */
+/**
+ * One HTTP round-trip with backoff retries; returns the raw reply text.
+ * A single deadline is computed up front and each attempt receives the
+ * remaining budget, so the total request (all attempts + backoff) cannot
+ * exceed `TOTAL_TIMEOUT_MS`.
+ */
 async function requestWithRetry(cfg, messages, jsonMode) {
+    const deadline = Date.now() + TOTAL_TIMEOUT_MS;
     let lastErr;
     for (let attempt = 0; attempt < MAX_HTTP_ATTEMPTS; attempt++) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0)
+            break; // total deadline exhausted; give up
         try {
-            return await chatOnce(cfg, messages, jsonMode);
+            return await chatOnce(cfg, messages, jsonMode, remaining);
         }
         catch (err) {
             lastErr = err;
@@ -32036,8 +32047,14 @@ function loadConfig(reader) {
  * three supported event kinds. Returns null when the run should exit silently:
  * a comment on a non-PR issue, a comment that is not the trigger, or the bot
  * replying to itself.
+ *
+ * `botLogin` must be the TOKEN identity (e.g. `github-actions[bot]`), never
+ * `github.context.actor`: on `issue_comment` events the actor is the comment
+ * author, so an actor-based loop guard would silently drop every human
+ * `/review` comment, and using it as the marker-match identity would break the
+ * summary exactly-once dedup.
  */
-function loadContext(eventName, payload, reader, actor) {
+function loadContext(eventName, payload, reader, botLogin) {
     const repo = payload?.repository;
     if (!repo?.name || !repo.owner?.login) {
         throw new Error('could not determine repository from event payload');
@@ -32048,7 +32065,7 @@ function loadContext(eventName, payload, reader, actor) {
         const pr = payload?.pull_request;
         if (!pr?.number)
             throw new Error('pull_request event missing pull_request number');
-        return { owner, repo: repoName, prNumber: pr.number, botLogin: actor };
+        return { owner, repo: repoName, prNumber: pr.number, botLogin };
     }
     if (eventName === 'issue_comment') {
         const issue = payload?.issue;
@@ -32056,7 +32073,7 @@ function loadContext(eventName, payload, reader, actor) {
             return null; // not a PR comment
         const comment = payload?.comment;
         const author = comment?.user?.login ?? '';
-        if (author && author.toLowerCase() === actor.toLowerCase())
+        if (author && author.toLowerCase() === botLogin.toLowerCase())
             return null; // loop guard
         const trigger = reader.getInput('comment_trigger') || '/review';
         if (!comment?.body?.trim().startsWith(trigger))
@@ -32065,7 +32082,7 @@ function loadContext(eventName, payload, reader, actor) {
             owner,
             repo: repoName,
             prNumber: issue.number,
-            botLogin: actor,
+            botLogin,
             issueComment: { author, body: comment.body ?? '' }
         };
     }
@@ -32074,7 +32091,7 @@ function loadContext(eventName, payload, reader, actor) {
         if (!Number.isInteger(prNumber) || prNumber <= 0) {
             throw new Error('workflow_dispatch requires a valid "pr_number" input');
         }
-        return { owner, repo: repoName, prNumber, botLogin: actor };
+        return { owner, repo: repoName, prNumber, botLogin };
     }
     throw new Error(`unsupported event "${eventName}"`);
 }
@@ -32325,7 +32342,8 @@ function filterFiles(files, opts) {
     const excludes = [...BUILTIN_EXCLUDES, ...(opts.exclude ?? [])];
     const kept = [];
     const skipped = [];
-    for (const f of files) {
+    for (let i = 0; i < files.length; i++) {
+        const f = files[i];
         if (opts.mode === 'review' && f.status === 'removed') {
             skipped.push({ file: f.filename, reason: 'removed file (inline review only)' });
             continue;
@@ -32342,13 +32360,13 @@ function filterFiles(files, opts) {
             skipped.push({ file: f.filename, reason: `patch too large (>${maxPatchChars} chars)` });
             continue;
         }
-        kept.push(f);
         if (kept.length >= maxFiles) {
-            for (const rest of files.slice(files.indexOf(f) + 1)) {
-                skipped.push({ file: rest.filename, reason: 'file count limit reached' });
+            for (let j = i; j < files.length; j++) {
+                skipped.push({ file: files[j].filename, reason: 'file count limit reached' });
             }
             break;
         }
+        kept.push(f);
     }
     return { kept, skipped };
 }
@@ -32712,15 +32730,33 @@ function errMessage(err) {
     return err instanceof Error ? err.message : String(err);
 }
 let cfg;
+/**
+ * Resolve the TOKEN identity (the account that authors comments/reviews), so
+ * loop-guard and summary marker-match can compare against the bot itself.
+ * On `issue_comment` events `github.context.actor` is the comment author, so
+ * it must never be used as the bot identity. Falls back to the actor (old
+ * behaviour) only if the token cannot be resolved.
+ */
+async function resolveBotLogin(octokit) {
+    try {
+        const { data: me } = await octokit.rest.users.getAuthenticated();
+        if (me?.login)
+            return me.login;
+    }
+    catch (err) {
+        core.warning(`ai-code-review: could not resolve token identity (${errMessage(err)}); falling back to actor`);
+    }
+    return github.context.actor;
+}
 async function main() {
     cfg = loadConfig(reader);
-    const actor = github.context.actor;
-    const ctx = loadContext(github.context.eventName, github.context.payload, reader, actor);
+    const octokit = github.getOctokit(cfg.githubToken);
+    const botLogin = await resolveBotLogin(octokit);
+    const ctx = loadContext(github.context.eventName, github.context.payload, reader, botLogin);
     if (!ctx) {
         core.info('ai-code-review: no actionable PR context, exiting silently');
         return;
     }
-    const octokit = github.getOctokit(cfg.githubToken);
     const prInfo = await getPr(octokit, ctx.owner, ctx.repo, ctx.prNumber);
     const llmCfg = {
         provider: cfg.provider,

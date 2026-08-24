@@ -76,6 +76,21 @@ describe('filterFiles', () => {
     expect(res.kept.map((f) => f.filename)).toEqual(['a.ts', 'b.ts']);
     expect(res.skipped.some((s) => /limit/i.test(s.reason))).toBe(true);
   });
+
+  it('keeps zero files when maxFiles is 0', () => {
+    const files = [file('a.ts'), file('b.ts')];
+    const res = filterFiles(files, { mode: 'review', maxFiles: 0 });
+    expect(res.kept).toHaveLength(0);
+    expect(res.skipped.length).toBe(files.length);
+    expect(res.skipped.every((s) => /limit/i.test(s.reason))).toBe(true);
+  });
+
+  it('does not over-attribute skip reasons when duplicate file objects appear', () => {
+    const dup = file('src/dup.ts');
+    const res = filterFiles([dup, dup], { mode: 'review', maxFiles: 1 });
+    expect(res.kept).toHaveLength(1);
+    expect(res.skipped.some((s) => /limit/i.test(s.reason))).toBe(true);
+  });
 });
 
 describe('chunkFiles', () => {

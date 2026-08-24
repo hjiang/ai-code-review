@@ -55,7 +55,7 @@ src/
     comments.ts             # List/find/post issue comments (marker-based dedup)
     reviews.ts              # Create PR review with inline comments
   util/
-    log.ts, retry.ts        # Logging, backoff helper
+    glob.ts, retry.ts       # Glob matching, backoff helper
 test/                       # vitest specs (mirrors src/)
 dist/index.js               # Bundled output (committed)
 ```

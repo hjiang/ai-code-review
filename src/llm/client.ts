@@ -19,6 +19,8 @@ export { LLMError } from './types.js';
 
 const MAX_HTTP_ATTEMPTS = 3;
 const MAX_PARSE_ATTEMPTS = 2;
+/** Total budget for one LLM request including all HTTP retries and backoff. */
+const TOTAL_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Resolve the effective provider from an explicit input + base URL. */
 export function resolveProvider(input: string | undefined, baseUrl: string): Provider {
@@ -30,11 +32,12 @@ export function resolveProvider(input: string | undefined, baseUrl: string): Pro
 async function chatOnce(
   cfg: LLMConfig,
   messages: LLMMessage[],
-  jsonMode: 'auto' | 'off'
+  jsonMode: 'auto' | 'off',
+  timeoutMs: number
 ): Promise<string> {
   return cfg.provider === 'anthropic'
-    ? anthropicChat(cfg, messages)
-    : openaiChat(cfg, messages, jsonMode);
+    ? anthropicChat(cfg, messages, timeoutMs)
+    : openaiChat(cfg, messages, jsonMode, timeoutMs);
 }
 
 function isRetryable(err: unknown): boolean {
@@ -42,16 +45,24 @@ function isRetryable(err: unknown): boolean {
   return !(err instanceof LLMError); // transient network/parse-agnostic errors
 }
 
-/** One HTTP round-trip with backoff retries; returns the raw reply text. */
+/**
+ * One HTTP round-trip with backoff retries; returns the raw reply text.
+ * A single deadline is computed up front and each attempt receives the
+ * remaining budget, so the total request (all attempts + backoff) cannot
+ * exceed `TOTAL_TIMEOUT_MS`.
+ */
 async function requestWithRetry(
   cfg: LLMConfig,
   messages: LLMMessage[],
   jsonMode: 'auto' | 'off'
 ): Promise<string> {
+  const deadline = Date.now() + TOTAL_TIMEOUT_MS;
   let lastErr: unknown;
   for (let attempt = 0; attempt < MAX_HTTP_ATTEMPTS; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break; // total deadline exhausted; give up
     try {
-      return await chatOnce(cfg, messages, jsonMode);
+      return await chatOnce(cfg, messages, jsonMode, remaining);
     } catch (err) {
       lastErr = err;
       if (isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {

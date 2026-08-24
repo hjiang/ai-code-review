@@ -96,12 +96,18 @@ export function loadConfig(reader: InputReader): ActionConfig {
  * three supported event kinds. Returns null when the run should exit silently:
  * a comment on a non-PR issue, a comment that is not the trigger, or the bot
  * replying to itself.
+ *
+ * `botLogin` must be the TOKEN identity (e.g. `github-actions[bot]`), never
+ * `github.context.actor`: on `issue_comment` events the actor is the comment
+ * author, so an actor-based loop guard would silently drop every human
+ * `/review` comment, and using it as the marker-match identity would break the
+ * summary exactly-once dedup.
  */
 export function loadContext(
   eventName: string,
   payload: Record<string, any>,
   reader: InputReader,
-  actor: string
+  botLogin: string
 ): PrContext | null {
   const repo = payload?.repository as
     | { name?: string; owner?: { login?: string } }
@@ -115,7 +121,7 @@ export function loadContext(
   if (eventName === 'pull_request') {
     const pr = payload?.pull_request as { number?: number } | undefined;
     if (!pr?.number) throw new Error('pull_request event missing pull_request number');
-    return { owner, repo: repoName, prNumber: pr.number, botLogin: actor };
+    return { owner, repo: repoName, prNumber: pr.number, botLogin };
   }
 
   if (eventName === 'issue_comment') {
@@ -123,14 +129,14 @@ export function loadContext(
     if (!issue?.number || !issue.pull_request) return null; // not a PR comment
     const comment = payload?.comment as { body?: string; user?: { login?: string } } | undefined;
     const author = comment?.user?.login ?? '';
-    if (author && author.toLowerCase() === actor.toLowerCase()) return null; // loop guard
+    if (author && author.toLowerCase() === botLogin.toLowerCase()) return null; // loop guard
     const trigger = reader.getInput('comment_trigger') || '/review';
     if (!comment?.body?.trim().startsWith(trigger)) return null;
     return {
       owner,
       repo: repoName,
       prNumber: issue.number,
-      botLogin: actor,
+      botLogin,
       issueComment: { author, body: comment.body ?? '' }
     };
   }
@@ -140,7 +146,7 @@ export function loadContext(
     if (!Number.isInteger(prNumber) || prNumber <= 0) {
       throw new Error('workflow_dispatch requires a valid "pr_number" input');
     }
-    return { owner, repo: repoName, prNumber, botLogin: actor };
+    return { owner, repo: repoName, prNumber, botLogin };
   }
 
   throw new Error(`unsupported event "${eventName}"`);

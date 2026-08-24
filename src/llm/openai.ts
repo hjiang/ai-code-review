@@ -6,8 +6,6 @@ import { buildOpenAiUrl } from './url.js';
 import { HttpError } from './types.js';
 import type { LLMConfig, LLMMessage } from './types.js';
 
-const TIMEOUT_MS = 5 * 60 * 1000;
-
 interface OpenAIResponse {
   choices?: { message?: { content?: string }; text?: string }[];
 }
@@ -30,13 +28,15 @@ function isResponseFormatError(status: number, body: string): boolean {
  * POST `{base}/chat/completions` and return the assistant text.
  * When `jsonMode` is `auto`, sends `response_format: {type:'json_object'}` and
  * retries once without it if the endpoint rejects the field (common on
- * third-party/self-hosted gateways). Throws `HttpError` on other non-2xx
+ * third-party/self-hosted gateways). `timeoutMs` is the remaining budget for
+ * this attempt (shared total deadline). Throws `HttpError` on other non-2xx
  * responses.
  */
 export async function openaiChat(
   cfg: LLMConfig,
   messages: LLMMessage[],
-  jsonMode: 'auto' | 'off'
+  jsonMode: 'auto' | 'off',
+  timeoutMs: number
 ): Promise<string> {
   const url = buildOpenAiUrl(cfg.baseUrl);
   const headers: Record<string, string> = {
@@ -56,7 +56,7 @@ export async function openaiChat(
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(TIMEOUT_MS)
+      signal: AbortSignal.timeout(timeoutMs)
     });
 
   let res = await doFetch();

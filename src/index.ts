@@ -25,22 +25,42 @@ function errMessage(err: unknown): string {
 
 let cfg: ActionConfig | undefined;
 
+/**
+ * Resolve the TOKEN identity (the account that authors comments/reviews), so
+ * loop-guard and summary marker-match can compare against the bot itself.
+ * On `issue_comment` events `github.context.actor` is the comment author, so
+ * it must never be used as the bot identity. Falls back to the actor (old
+ * behaviour) only if the token cannot be resolved.
+ */
+async function resolveBotLogin(
+  octokit: ReturnType<typeof github.getOctokit>
+): Promise<string> {
+  try {
+    const { data: me } = await octokit.rest.users.getAuthenticated();
+    if (me?.login) return me.login;
+  } catch (err) {
+    core.warning(`ai-code-review: could not resolve token identity (${errMessage(err)}); falling back to actor`);
+  }
+  return github.context.actor;
+}
+
 async function main(): Promise<void> {
   cfg = loadConfig(reader);
 
-  const actor = github.context.actor;
+  const octokit = github.getOctokit(cfg.githubToken);
+  const botLogin = await resolveBotLogin(octokit);
+
   const ctx = loadContext(
     github.context.eventName,
     github.context.payload as Record<string, any>,
     reader,
-    actor
+    botLogin
   );
   if (!ctx) {
     core.info('ai-code-review: no actionable PR context, exiting silently');
     return;
   }
 
-  const octokit = github.getOctokit(cfg.githubToken);
   const prInfo = await getPr(octokit, ctx.owner, ctx.repo, ctx.prNumber);
 
   const llmCfg: LLMConfig = {

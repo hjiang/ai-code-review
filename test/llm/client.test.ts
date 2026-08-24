@@ -146,6 +146,26 @@ describe('callLLM — retries', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it('shares a single 5-minute deadline across retry attempts (shrinking per attempt)', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(resp(429, 'rate limited'))
+      .mockResolvedValueOnce(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = callLLM(baseCfg, [{ role: 'user', content: 'hi' }]);
+    await vi.advanceTimersByTimeAsync(2000); // first backoff (2s)
+    await expect(promise).resolves.toEqual({ ok: 1 });
+    const timeouts = timeoutSpy.mock.calls.map((c) => c[0] as number);
+    expect(timeouts).toHaveLength(2);
+    // Second attempt's remaining budget must be smaller than the first,
+    // proving the deadline is shared (not a fresh 5-min per attempt).
+    expect(timeouts[1]).toBeLessThan(timeouts[0]);
+    expect(timeouts[0]).toBeLessThanOrEqual(5 * 60 * 1000);
+  });
+
   it('retries transient network errors', async () => {
     vi.useFakeTimers();
     vi.spyOn(Math, 'random').mockReturnValue(0.5);

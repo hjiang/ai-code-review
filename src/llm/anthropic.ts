@@ -6,7 +6,6 @@ import { buildAnthropicUrl } from './url.js';
 import { HttpError } from './types.js';
 import type { LLMConfig, LLMMessage } from './types.js';
 
-const TIMEOUT_MS = 5 * 60 * 1000;
 const ANTHROPIC_VERSION = '2023-06-01';
 
 interface AnthropicResponse {
@@ -23,12 +22,14 @@ function extractText(data: AnthropicResponse): string {
 
 /**
  * POST `{base}/v1/messages`. System messages are moved into the `system`
- * field (not part of `messages`), as required by the Anthropic API. Throws
+ * field (not part of `messages`), as required by the Anthropic API. `timeoutMs`
+ * is the remaining budget for this attempt (shared total deadline). Throws
  * `HttpError` on non-2xx responses.
  */
 export async function anthropicChat(
   cfg: LLMConfig,
-  messages: LLMMessage[]
+  messages: LLMMessage[],
+  timeoutMs: number
 ): Promise<string> {
   const url = buildAnthropicUrl(cfg.baseUrl);
   const system = messages
@@ -55,7 +56,7 @@ export async function anthropicChat(
       'content-type': 'application/json'
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(TIMEOUT_MS)
+    signal: AbortSignal.timeout(timeoutMs)
   });
   if (!res.ok) {
     throw new HttpError(res.status, (await res.text()).slice(0, 500));

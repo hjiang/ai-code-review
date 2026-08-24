@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { runReview, validateFindings } from '../src/review.js';
+import type { RawFinding } from '../src/review.js';
 import type { ActionConfig, PrContext } from '../src/context.js';
 import type { PrInfo } from '../src/github/reviews.js';
 import type { PrFile } from '../src/diff.js';
@@ -139,6 +140,23 @@ describe('validateFindings', () => {
     }));
     const out = validateFindings(many, wide, noop);
     expect(out).toHaveLength(30);
+  });
+
+  it('caps at 30 findings preferring higher severity (deterministic tie-break)', () => {
+    const patch40 = `@@ -1,40 +1,40 @@\n${Array.from({ length: 40 }, (_, i) => `+line${i}`).join('\n')}\n`;
+    const wide = [file('src/wide.ts', patch40)];
+    const many: RawFinding[] = [];
+    // 32 suggestions arrive first...
+    for (let i = 1; i <= 32; i++) {
+      many.push({ path: 'src/wide.ts', line: i, severity: 'suggestion', comment_md: `s${i}` });
+    }
+    // ...and the criticals arrive last: they must survive the cap.
+    many.push({ path: 'src/wide.ts', line: 33, severity: 'critical', comment_md: 'c33' });
+    many.push({ path: 'src/wide.ts', line: 34, severity: 'critical', comment_md: 'c34' });
+    const out = validateFindings(many, wide, noop);
+    expect(out).toHaveLength(30);
+    expect(out.filter((f) => f.severity === 'critical')).toHaveLength(2);
+    expect(out.filter((f) => f.severity === 'suggestion')).toHaveLength(28);
   });
 });
 

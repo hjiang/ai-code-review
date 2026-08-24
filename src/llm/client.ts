@@ -66,7 +66,10 @@ async function requestWithRetry(
     } catch (err) {
       lastErr = err;
       if (isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {
-        await sleep(backoffMs(attempt));
+        // Never sleep past the deadline: clamp the backoff to the remaining
+        // budget (skipping the sleep entirely when it is exhausted).
+        const wait = Math.min(backoffMs(attempt), deadline - Date.now());
+        if (wait > 0) await sleep(wait);
         continue;
       }
       break;

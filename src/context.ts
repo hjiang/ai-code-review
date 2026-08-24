@@ -48,6 +48,31 @@ function toBool(value: string): boolean {
   return value.toLowerCase() === 'true';
 }
 
+/**
+ * Parse a numeric input, falling back to `def` when unset. Throws a clear
+ * error naming the input when the value is not a finite number (or violates
+ * `min`), so a bad workflow value fails fast instead of producing NaN that
+ * later surfaces as a confusing provider API error.
+ */
+function numInput(
+  reader: InputReader,
+  name: string,
+  def: number,
+  parse: (s: string) => number,
+  min: number
+): number {
+  const raw = reader.getInput(name);
+  if (!raw) return def;
+  const value = parse(raw);
+  if (!Number.isFinite(value) || value < min) {
+    throw new Error(`invalid input "${name}": "${raw}" is not a valid number >= ${min}`);
+  }
+  return value;
+}
+
+const intInput = (reader: InputReader, name: string, def: number, min = 1) =>
+  numInput(reader, name, def, (s) => parseInt(s, 10), min);
+
 /** Split comma/newline separated input into trimmed non-empty patterns. */
 export function splitPatterns(value: string): string[] {
   return value
@@ -80,11 +105,11 @@ export function loadConfig(reader: InputReader): ActionConfig {
     baseUrl,
     model,
     provider: resolveProvider(reader.getInput('provider') || 'auto', baseUrl),
-    maxTokens: parseInt(reader.getInput('max_tokens') || '8192', 10),
-    temperature: parseFloat(reader.getInput('temperature') || '0.2'),
+    maxTokens: intInput(reader, 'max_tokens', 8192),
+    temperature: numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0),
     exclude: splitPatterns(reader.getInput('exclude')),
-    maxFiles: parseInt(reader.getInput('max_files') || '40', 10),
-    maxPatchChars: parseInt(reader.getInput('max_patch_chars') || '100000', 10),
+    maxFiles: intInput(reader, 'max_files', 40),
+    maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
     reviewDrafts: toBool(reader.getInput('review_drafts')),
     commentTrigger: reader.getInput('comment_trigger') || '/review',
     failOnError: toBool(reader.getInput('fail_on_error'))

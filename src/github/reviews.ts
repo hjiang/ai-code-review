@@ -55,7 +55,7 @@ export async function postReview(
     firstErr = err;
   }
 
-  while (comments.length > 1) {
+  while (comments.length > 0) {
     const dropped = comments.pop()!;
     log(`dropping invalid review comment anchor ${dropped.path}:${dropped.line} (GitHub 422)`);
     try {
@@ -64,7 +64,8 @@ export async function postReview(
       if (!is422(err)) throw err;
     }
   }
-  // Every anchor was rejected; surface the original 422.
+  // Every anchor was rejected (even the final empty-comments attempt);
+  // surface the original 422.
   throw firstErr;
 }
 

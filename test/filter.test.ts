@@ -123,6 +123,13 @@ describe('chunkFiles', () => {
     expect(chunks[0][0].patch).toMatch(/\[…truncated\]$/);
   });
 
+  it('never exceeds maxChars even when maxChars is smaller than the truncation marker', () => {
+    const big = file('a.ts', { patch: patchOfLen(200) });
+    const chunks = chunkFiles([big], 5); // marker alone is 13 chars
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0][0].patch!.length).toBeLessThanOrEqual(5);
+  });
+
   it('returns an empty array for empty input', () => {
     expect(chunkFiles([], 100)).toEqual([]);
   });

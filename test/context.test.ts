@@ -42,6 +42,24 @@ describe('loadConfig', () => {
     }
   });
 
+  it('throws a clear error for non-numeric numeric inputs', () => {
+    for (const name of ['max_tokens', 'max_files', 'max_patch_chars']) {
+      const r = reader({ [name]: 'lots' });
+      expect(() => loadConfig(r)).toThrow(`invalid input "${name}"`);
+    }
+    const r = reader({ temperature: 'hot' });
+    expect(() => loadConfig(r)).toThrow('invalid input "temperature"');
+  });
+
+  it('throws a clear error for non-positive numeric inputs', () => {
+    for (const name of ['max_tokens', 'max_files', 'max_patch_chars']) {
+      const r = reader({ [name]: '0' });
+      expect(() => loadConfig(r)).toThrow(`invalid input "${name}"`);
+    }
+    const r = reader({ temperature: '-0.5' });
+    expect(() => loadConfig(r)).toThrow('invalid input "temperature"');
+  });
+
   it('validates the mode value', () => {
     expect(() => loadConfig(reader({ mode: 'bogus' }))).toThrow(/mode/i);
     expect(loadConfig(reader({ mode: 'summary' })).mode).toBe('summary');

@@ -122,8 +122,12 @@ export function validateFindings(
     }
   }
 
-  for (const s of skipped) log(`review: dropped finding — ${s}`);
-  return [...byKey.values()].slice(0, MAX_COMMENTS);
+  for (const s of skipped) log(`review: dropped finding - ${s}`);
+  // Prefer higher severity when capping; Array#sort is stable, so equal
+  // severities keep their original (deterministic) insertion order.
+  return [...byKey.values()]
+    .sort((a, b) => severityRank[b.severity] - severityRank[a.severity])
+    .slice(0, MAX_COMMENTS);
 }
 
 function severityCounts(findings: ValidFinding[]): Record<Severity, number> {

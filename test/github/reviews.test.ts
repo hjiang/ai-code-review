@@ -92,7 +92,33 @@ describe('postReview', () => {
         comments: [okComment('a.ts', 1)]
       })
     ).rejects.toBe(err);
-    expect(createReview).toHaveBeenCalledTimes(1);
+    // First attempt (with the comment) plus one retry with no comments.
+    expect(createReview).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops a single rejected anchor and retries with no comments', async () => {
+    const err = new Error('Validation Failed') as Error & { status?: number };
+    err.status = 422;
+    const calls: unknown[] = [];
+    const createReview = vi.fn(async (p: unknown) => {
+      calls.push(p);
+      if ((p as { comments: unknown[] }).comments.length > 0) throw err;
+      return { data: { id: 5 } };
+    });
+    const octo = makeOctokit(createReview);
+    const log = vi.fn();
+    const result = await postReview(
+      octo,
+      'o',
+      'r',
+      7,
+      { commitId: 'x', body: 'review', comments: [okComment('bad.ts', 9999, 'bad anchor')] },
+      log
+    );
+    expect(result).toEqual({ data: { id: 5 } });
+    expect(createReview).toHaveBeenCalledTimes(2);
+    expect((calls[1] as { comments: unknown[] }).comments).toEqual([]);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('bad.ts:9999'));
   });
 
   it('rethrows non-422 errors immediately', async () => {

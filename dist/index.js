@@ -31950,7 +31950,11 @@ async function requestWithRetry(cfg, messages, jsonMode) {
         catch (err) {
             lastErr = err;
             if (isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {
-                await sleep(backoffMs(attempt));
+                // Never sleep past the deadline: clamp the backoff to the remaining
+                // budget (skipping the sleep entirely when it is exhausted).
+                const wait = Math.min(backoffMs(attempt), deadline - Date.now());
+                if (wait > 0)
+                    await sleep(wait);
                 continue;
             }
             break;
@@ -32001,6 +32005,23 @@ async function callLLM(cfg, messages) {
 function toBool(value) {
     return value.toLowerCase() === 'true';
 }
+/**
+ * Parse a numeric input, falling back to `def` when unset. Throws a clear
+ * error naming the input when the value is not a finite number (or violates
+ * `min`), so a bad workflow value fails fast instead of producing NaN that
+ * later surfaces as a confusing provider API error.
+ */
+function numInput(reader, name, def, parse, min) {
+    const raw = reader.getInput(name);
+    if (!raw)
+        return def;
+    const value = parse(raw);
+    if (!Number.isFinite(value) || value < min) {
+        throw new Error(`invalid input "${name}": "${raw}" is not a valid number >= ${min}`);
+    }
+    return value;
+}
+const intInput = (reader, name, def, min = 1) => numInput(reader, name, def, (s) => parseInt(s, 10), min);
 /** Split comma/newline separated input into trimmed non-empty patterns. */
 function splitPatterns(value) {
     return value
@@ -32034,11 +32055,11 @@ function loadConfig(reader) {
         baseUrl,
         model,
         provider: resolveProvider(reader.getInput('provider') || 'auto', baseUrl),
-        maxTokens: parseInt(reader.getInput('max_tokens') || '8192', 10),
-        temperature: parseFloat(reader.getInput('temperature') || '0.2'),
+        maxTokens: intInput(reader, 'max_tokens', 8192),
+        temperature: numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0),
         exclude: splitPatterns(reader.getInput('exclude')),
-        maxFiles: parseInt(reader.getInput('max_files') || '40', 10),
-        maxPatchChars: parseInt(reader.getInput('max_patch_chars') || '100000', 10),
+        maxFiles: intInput(reader, 'max_files', 40),
+        maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
         reviewDrafts: toBool(reader.getInput('review_drafts')),
         commentTrigger: reader.getInput('comment_trigger') || '/review',
         failOnError: toBool(reader.getInput('fail_on_error'))
@@ -32132,7 +32153,7 @@ async function postReview(octokit, owner, repo, prNumber, input, log = (msg) => 
             throw err;
         firstErr = err;
     }
-    while (comments.length > 1) {
+    while (comments.length > 0) {
         const dropped = comments.pop();
         log(`dropping invalid review comment anchor ${dropped.path}:${dropped.line} (GitHub 422)`);
         try {
@@ -32143,7 +32164,8 @@ async function postReview(octokit, owner, repo, prNumber, input, log = (msg) => 
                 throw err;
         }
     }
-    // Every anchor was rejected; surface the original 422.
+    // Every anchor was rejected (even the final empty-comments attempt);
+    // surface the original 422.
     throw firstErr;
 }
 /** Fetch authoritative PR metadata (head SHA, draft state, title, body). */
@@ -32392,7 +32414,9 @@ function chunkFiles(files, maxChars) {
             const budget = Math.max(0, maxChars - TRUNCATION_MARKER.length);
             const truncated = {
                 ...f,
-                patch: f.patch ? f.patch.slice(0, budget) + TRUNCATION_MARKER : null
+                // Slice again to maxChars so the marker itself can never push the
+                // patch over the budget when maxChars < marker length.
+                patch: f.patch ? (f.patch.slice(0, budget) + TRUNCATION_MARKER).slice(0, maxChars) : null
             };
             chunks.push([truncated]);
             continue;
@@ -32557,8 +32581,12 @@ function validateFindings(findings, prFiles, log) {
         }
     }
     for (const s of skipped)
-        log(`review: dropped finding — ${s}`);
-    return [...byKey.values()].slice(0, MAX_COMMENTS);
+        log(`review: dropped finding - ${s}`);
+    // Prefer higher severity when capping; Array#sort is stable, so equal
+    // severities keep their original (deterministic) insertion order.
+    return [...byKey.values()]
+        .sort((a, b) => severityRank[b.severity] - severityRank[a.severity])
+        .slice(0, MAX_COMMENTS);
 }
 function severityCounts(findings) {
     return {

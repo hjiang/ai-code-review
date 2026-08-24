@@ -103,7 +103,9 @@ export function chunkFiles(files: PrFile[], maxChars: number): PrFile[][] {
       const budget = Math.max(0, maxChars - TRUNCATION_MARKER.length);
       const truncated: PrFile = {
         ...f,
-        patch: f.patch ? f.patch.slice(0, budget) + TRUNCATION_MARKER : null
+        // Slice again to maxChars so the marker itself can never push the
+        // patch over the budget when maxChars < marker length.
+        patch: f.patch ? (f.patch.slice(0, budget) + TRUNCATION_MARKER).slice(0, maxChars) : null
       };
       chunks.push([truncated]);
       continue;

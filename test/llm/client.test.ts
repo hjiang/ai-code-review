@@ -180,6 +180,34 @@ describe('callLLM — retries', () => {
     await done;
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it('clamps the backoff sleep to the remaining deadline budget', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5); // backoff(0) = 2s exactly
+    // Attempt 1 consumes 299s of the 5-minute deadline, leaving 1s.
+    const fetchMock = vi.fn().mockImplementationOnce(async () => {
+      await sleep(299_000);
+      return resp(429, 'rate limited');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    let settled = false;
+    const promise = callLLM(baseCfg, [{ role: 'user', content: 'hi' }]).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      }
+    );
+    await vi.advanceTimersByTimeAsync(299_000); // first attempt finishes at t=299s
+    await vi.advanceTimersByTimeAsync(1_000); // t=300s: deadline exhausted
+    // The unclamped 2s backoff would still be pending here; the clamped sleep
+    // (1s) has fired and the request gave up exactly at the deadline.
+    expect(settled).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await promise;
+  });
 });
 
 describe('callLLM — JSON re-ask', () => {

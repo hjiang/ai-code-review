@@ -6,7 +6,7 @@ inputs:
     default: 'review'
     required: false
   github_token:
-    description: 'GitHub token with pull-requests: write'
+    description: 'GitHub token; needs pull-requests: write (review mode) and issues: write (summary mode)'
     default: '${{ github.token }}'
     required: false
   api_base_url:
@@ -39,7 +39,7 @@ inputs:
     default: '40'
     required: false
   max_patch_chars:
-    description: 'Total diff characters sent to the LLM'
+    description: 'Total diff characters sent to the LLM per chunk (also the per-file patch cap)'
     default: '100000'
     required: false
   review_drafts:

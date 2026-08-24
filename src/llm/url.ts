@@ -17,6 +17,7 @@ export function buildOpenAiUrl(baseUrl: string): string {
 
 export function buildAnthropicUrl(baseUrl: string): string {
   let base = stripTrailingSlash(baseUrl);
+  if (base.endsWith('/v1/messages')) return base;
   if (!base.endsWith('/v1')) base += '/v1';
   return `${base}/messages`;
 }

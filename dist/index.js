@@ -31711,6 +31711,8 @@ function buildOpenAiUrl(baseUrl) {
 }
 function buildAnthropicUrl(baseUrl) {
     let base = stripTrailingSlash(baseUrl);
+    if (base.endsWith('/v1/messages'))
+        return base;
     if (!base.endsWith('/v1'))
         base += '/v1';
     return `${base}/messages`;
@@ -32579,7 +32581,8 @@ async function runReview(cfg, ctx, prInfo, deps) {
     const { kept } = filterFiles(files, {
         mode: 'review',
         exclude: cfg.exclude,
-        maxFiles: cfg.maxFiles
+        maxFiles: cfg.maxFiles,
+        maxPatchChars: cfg.maxPatchChars
     });
     if (kept.length === 0) {
         const body = '## 🤖 AI Review\n\nNothing to review (all files were filtered out).';
@@ -32695,7 +32698,8 @@ async function runSummary(cfg, ctx, prInfo, deps) {
     const { kept } = filterFiles(files, {
         mode: 'summary',
         exclude: cfg.exclude,
-        maxFiles: cfg.maxFiles
+        maxFiles: cfg.maxFiles,
+        maxPatchChars: cfg.maxPatchChars
     });
     const messages = buildSummaryMessages({ title: prInfo.title, body: prInfo.body }, kept, cfg.maxPatchChars);
     const result = await deps.llm(messages);

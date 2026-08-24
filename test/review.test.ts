@@ -190,7 +190,8 @@ describe('runReview', () => {
         { path: 'b.ts', line: 2, severity: 'warning', comment_md: 'B' }
       ]
     }));
-    const smallCfg = { ...cfg, maxPatchChars: 20 };
+    // Budget fits one 26-char patch per chunk but not two -> 2 chunks, no drops.
+    const smallCfg = { ...cfg, maxPatchChars: 30 };
     const res = await runReview(smallCfg, ctx, prInfo, { octokit: octo, llm });
     expect(res.commentCount).toBe(2);
     expect(llm).toHaveBeenCalledTimes(2);
@@ -206,5 +207,17 @@ describe('runReview', () => {
     expect(octo.rest.pulls.createReview).toHaveBeenCalledWith(
       expect.objectContaining({ comments: [] })
     );
+  });
+
+  it('forwards cfg.maxPatchChars to the per-file patch cap', async () => {
+    // Patch between the filter default per-file cap (20k) and cfg.maxPatchChars:
+    // must be kept because the config budget governs, not the hardcoded default.
+    const bigPatch = `@@ -1,1000 +1,1000 @@\n${Array.from({ length: 1000 }, () => '+xxxxxxxxxxxxxxxxxxxxxxxxx').join('\n')}\n`; // ~27k chars > 20k default per-file cap
+    const octo = makeOctokit([file('src/big.ts', bigPatch)]);
+    const llm = vi.fn(async () => ({ findings: [] }));
+    const bigCfg = { ...cfg, maxPatchChars: 100000 };
+    const res = await runReview(bigCfg, ctx, prInfo, { octokit: octo, llm });
+    expect(llm).toHaveBeenCalled();
+    expect(res.filesReviewed).toBe(1);
   });
 });

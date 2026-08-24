@@ -154,7 +154,8 @@ export async function runReview(
   const { kept } = filterFiles(files, {
     mode: 'review',
     exclude: cfg.exclude,
-    maxFiles: cfg.maxFiles
+    maxFiles: cfg.maxFiles,
+    maxPatchChars: cfg.maxPatchChars
   });
 
   if (kept.length === 0) {

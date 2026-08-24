@@ -44,6 +44,7 @@ on:
     types: [opened, reopened, ready_for_review]
 permissions:
   pull-requests: write
+  issues: write # summary posts via the issue-comments API
   contents: read
 concurrency:
   group: ai-summary-${{ github.event.pull_request.number }}
@@ -143,7 +144,7 @@ Anthropic adapter; everything else uses the OpenAI adapter. Override with the
 | Input | Required | Default | Notes |
 |---|---|---|---|
 | `mode` | no | `review` | `summary` \| `review` \| `both` |
-| `github_token` | no | `${{ github.token }}` | Needs `pull-requests: write` |
+| `github_token` | no | `${{ github.token }}` | Needs `pull-requests: write` (review) + `issues: write` (summary) |
 | `api_base_url` | yes | — | LLM API base URL |
 | `api_key` | yes | — | Secret |
 | `model` | yes | — | Model name |
@@ -152,7 +153,7 @@ Anthropic adapter; everything else uses the OpenAI adapter. Override with the
 | `temperature` | no | `0.2` | |
 | `exclude` | no | built-ins | Extra glob excludes (comma/newline separated) |
 | `max_files` | no | `40` | Files per review run |
-| `max_patch_chars` | no | `100000` | Total diff chars sent to the LLM per chunk |
+| `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file patch cap) |
 | `review_drafts` | no | `false` | Review draft PRs |
 | `comment_trigger` | no | `/review` | Issue-comment trigger text |
 | `pr_number` | no | — | Required for `workflow_dispatch` |

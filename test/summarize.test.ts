@@ -34,6 +34,11 @@ const apiFile = (filename: string) => ({
   patch: '@@ -1 +1 @@\n+new line\n'
 });
 
+const apiFileWithPatch = (filename: string, patch: string) => ({
+  ...apiFile(filename),
+  patch
+});
+
 function makeOctokit(over: Partial<MinimalOctokit['rest']> = {}): MinimalOctokit {
   return {
     rest: {
@@ -102,5 +107,23 @@ describe('runSummary', () => {
     await expect(
       runSummary(cfg, ctx, prInfo, { octokit: octo, llm })
     ).rejects.toThrow(/summary_md/);
+  });
+
+  it('forwards cfg.maxPatchChars to the per-file patch cap', async () => {
+    // Patch between the filter default per-file cap (20k) and cfg.maxPatchChars:
+    // must reach the LLM because the config budget governs, not the hardcoded default.
+    const bigPatch = `@@ -1,1000 +1,1000 @@\n${Array.from({ length: 1000 }, () => '+xxxxxxxxxxxxxxxxxxxxxxxxx').join('\n')}\n`; // ~27k chars > 20k default per-file cap
+    const octo = makeOctokit({
+      pulls: {
+        listFiles: vi.fn(async () => ({ data: [apiFileWithPatch('src/big.ts', bigPatch)] })),
+        createReview: vi.fn(async () => ({})),
+        get: vi.fn()
+      }
+    });
+    const llm = vi.fn(async () => ({ summary_md: 'ok' }));
+    const bigCfg = { ...cfg, maxPatchChars: 100000 };
+    const res = await runSummary(bigCfg, ctx, prInfo, { octokit: octo, llm });
+    expect(res.posted).toBe(true);
+    expect(res.filesReviewed).toBe(1);
   });
 });

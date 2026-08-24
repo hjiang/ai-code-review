@@ -37,4 +37,9 @@ describe('buildAnthropicUrl', () => {
       'https://proxy.example.com/v1/messages'
     );
   });
+  it('is idempotent for an already-full messages endpoint', () => {
+    const full = 'https://api.anthropic.com/v1/messages';
+    expect(buildAnthropicUrl(full)).toBe(full);
+    expect(buildAnthropicUrl(full + '/')).toBe(full);
+  });
 });

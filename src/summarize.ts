@@ -56,7 +56,8 @@ export async function runSummary(
   const { kept } = filterFiles(files, {
     mode: 'summary',
     exclude: cfg.exclude,
-    maxFiles: cfg.maxFiles
+    maxFiles: cfg.maxFiles,
+    maxPatchChars: cfg.maxPatchChars
   });
 
   const messages = buildSummaryMessages(

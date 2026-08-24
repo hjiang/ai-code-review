@@ -313,6 +313,7 @@ on:
     types: [opened, reopened, ready_for_review]
 permissions:
   pull-requests: write
+  issues: write # summary posts via the issue-comments API
   contents: read
 concurrency:
   group: ai-summary-${{ github.event.pull_request.number }}
@@ -331,8 +332,6 @@ jobs:
           api_base_url: ${{ secrets.LLM_BASE_URL }}
           api_key: ${{ secrets.LLM_API_KEY }}
           model: ${{ vars.LLM_MODEL }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
 ```
 
 ### 7.2 `.github/workflows/ai-review.yml`

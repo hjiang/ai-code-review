@@ -208,6 +208,21 @@ describe('callLLM — retries', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await promise;
   });
+
+  it('throws an explicit deadline-exceeded error when the budget is already exhausted', async () => {
+    // Simulate the clock jumping past the deadline between the deadline
+    // computation and the first attempt's remaining-budget check, so the loop
+    // breaks before any attempt starts and `lastErr` stays undefined.
+    const T0 = Date.now();
+    vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(T0)
+      .mockReturnValue(T0 + 5 * 60 * 1000 + 1);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = callLLM(baseCfg, [{ role: 'user', content: 'hi' }]);
+    await expect(promise).rejects.toThrow(/deadline exceeded/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('callLLM — JSON re-ask', () => {

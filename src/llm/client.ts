@@ -75,6 +75,12 @@ async function requestWithRetry(
       break;
     }
   }
+  if (lastErr === undefined) {
+    // The shared deadline was exhausted before any attempt could start (e.g.
+    // the clock jumped past the deadline between computation and the first
+    // attempt); surface a clear timeout instead of `LLM request failed: undefined`.
+    throw new LLMError(`LLM deadline exceeded after ${TOTAL_TIMEOUT_MS}ms`);
+  }
   if (lastErr instanceof HttpError) {
     throw new LLMError(`LLM HTTP ${lastErr.status}: ${lastErr.message}`);
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { postReview } from '../../src/github/reviews.js';
+import { getPr, postReview } from '../../src/github/reviews.js';
 import type { InlineComment, MinimalOctokit } from '../../src/github/types.js';
 
 const okComment = (path: string, line: number, body = 'good'): InlineComment => ({
@@ -109,5 +109,27 @@ describe('postReview', () => {
       })
     ).rejects.toBe(err);
     expect(createReview).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('getPr', () => {
+  it('maps the pulls.get response onto PrInfo', async () => {
+    const get = vi.fn(async () => ({
+      data: { head: { sha: 'sha1' }, draft: false, title: 'T', body: 'B' }
+    }));
+    const octo = {
+      rest: { issues: {}, pulls: { get, createReview: vi.fn(), listFiles: vi.fn() } }
+    } as unknown as MinimalOctokit;
+    const info = await getPr(octo, 'o', 'r', 7);
+    expect(info).toEqual({ commitId: 'sha1', isDraft: false, title: 'T', body: 'B' });
+    expect(get).toHaveBeenCalledWith({ owner: 'o', repo: 'r', pull_number: 7 });
+  });
+
+  it('coerces a missing PR body to an empty string', async () => {
+    const get = vi.fn(async () => ({ data: { head: { sha: 's' }, draft: true, title: 'T', body: null } }));
+    const octo = {
+      rest: { issues: {}, pulls: { get, createReview: vi.fn(), listFiles: vi.fn() } }
+    } as unknown as MinimalOctokit;
+    expect((await getPr(octo, 'o', 'r', 7)).body).toBe('');
   });
 });

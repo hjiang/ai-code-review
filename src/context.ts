@@ -61,9 +61,11 @@ export function loadConfig(reader: InputReader): ActionConfig {
   const apiKey = reader.getInput('api_key');
   const baseUrl = reader.getInput('api_base_url');
   const model = reader.getInput('model');
+  const githubToken = reader.getInput('github_token');
   if (!apiKey) throw new Error('required input "api_key" is missing');
   if (!baseUrl) throw new Error('required input "api_base_url" is missing');
   if (!model) throw new Error('required input "model" is missing');
+  if (!githubToken) throw new Error('required input "github_token" is missing');
   reader.setSecret(apiKey);
 
   const modeInput = (reader.getInput('mode') || 'review').toLowerCase();

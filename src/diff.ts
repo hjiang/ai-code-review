@@ -105,3 +105,44 @@ export function validAnchors(patch: string): Set<number> {
   }
   return anchors;
 }
+
+/**
+ * Fetch all files changed by a PR (paginated, 100 per page, page cap 10),
+ * mapping the API shape onto `PrFile`. Missing `patch` (binary) becomes null.
+ */
+export async function fetchPrFiles(
+  octokit: import('./github/types.js').MinimalOctokit,
+  owner: string,
+  repo: string,
+  prNumber: number
+): Promise<PrFile[]> {
+  const files: PrFile[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const { data } = await octokit.rest.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: 100,
+      page
+    });
+    for (const item of data as Array<{
+      filename: string;
+      status: string;
+      additions: number;
+      deletions: number;
+      changes: number;
+      patch?: string;
+    }>) {
+      files.push({
+        filename: item.filename,
+        status: item.status,
+        additions: item.additions,
+        deletions: item.deletions,
+        changes: item.changes,
+        patch: item.patch ?? null
+      });
+    }
+    if (data.length < 100) break;
+  }
+  return files;
+}

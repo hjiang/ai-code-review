@@ -19,32 +19,13 @@ export interface InlineComment {
 export interface MinimalOctokit {
   rest: {
     issues: {
-      listComments: (p: {
-        owner: string;
-        repo: string;
-        issue_number: number;
-        per_page?: number;
-        page?: number;
-      }) => Promise<{ data: PrComment[] }>;
-      createComment: (p: {
-        owner: string;
-        repo: string;
-        issue_number: number;
-        body: string;
-      }) => Promise<unknown>;
+      listComments: (p: any) => Promise<{ data: PrComment[] }>;
+      createComment: (p: any) => Promise<unknown>;
     };
     pulls: {
-      listFiles: (p: {
-        owner: string;
-        repo: string;
-        pull_number: number;
-        per_page?: number;
-        page?: number;
-      }) => Promise<{ data: unknown[] }>;
-      createReview: (p: Record<string, unknown>) => Promise<unknown>;
-      get: (p: { owner: string; repo: string; pull_number: number }) => Promise<{
-        data: { head: { sha: string }; draft: boolean; title: string; body: string | null };
-      }>;
+      listFiles: (p: any) => Promise<{ data: unknown[] }>;
+      createReview: (p: any) => Promise<unknown>;
+      get: (p: any) => Promise<{ data: any }>;
     };
   };
 }

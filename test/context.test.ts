@@ -7,6 +7,7 @@ function reader(over: Record<string, string> = {}): InputReader {
     api_base_url: 'https://api.example.com/v1',
     api_key: 'sk-key',
     model: 'model-x',
+    github_token: 'gh-token',
     ...over
   };
   return {

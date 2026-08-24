@@ -1,0 +1,25 @@
+name: AI PR Summary
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+permissions:
+  pull-requests: write
+  issues: write # summary posts via the issue-comments API
+  contents: read
+concurrency:
+  group: ai-summary-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  summary:
+    runs-on: ubuntu-latest # change to your self-hosted label, e.g. runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4 # required to resolve the local action
+      - uses: actions/setup-node@v4 # pin Node on self-hosted runners
+        with:
+          node-version: 24
+      - uses: ./
+        with:
+          mode: summary
+          api_base_url: ${{ secrets.LLM_BASE_URL }}
+          api_key: ${{ secrets.LLM_API_KEY }}
+          model: ${{ vars.LLM_MODEL }}

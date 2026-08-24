@@ -66,7 +66,7 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
 | Input | Required | Default | Notes |
 |---|---|---|---|
 | `mode` | no | `review` | `summary` \| `review` \| `both` |
-| `github_token` | no | `${{ github.token }}` | Needs `pull-requests: write` |
+| `github_token` | no | `${{ github.token }}` | Needs `pull-requests: write` (review) + `issues: write` (summary) |
 | `api_base_url` | yes | — | e.g. `https://api.openai.com/v1` |
 | `api_key` | yes | — | Secret |
 | `model` | yes | — | e.g. `deepseek-chat`, `claude-sonnet-4-5` |
@@ -75,7 +75,7 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
 | `temperature` | no | `0.2` | |
 | `exclude` | no | built-ins | Comma/newline-separated glob patterns |
 | `max_files` | no | `40` | Files per review run |
-| `max_patch_chars` | no | `100000` | Total diff chars sent to the LLM |
+| `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file cap) |
 | `review_drafts` | no | `false` | Review draft PRs |
 | `fail_on_error` | no | `false` | Fail the workflow if the action errors |
 

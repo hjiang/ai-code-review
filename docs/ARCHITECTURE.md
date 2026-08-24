@@ -55,7 +55,7 @@ src/
     comments.ts             # List/find/post issue comments (marker-based dedup)
     reviews.ts              # Create PR review with inline comments
   util/
-    log.ts, retry.ts        # Logging, backoff helper
+    glob.ts, retry.ts       # Glob matching, backoff helper
 test/                       # vitest specs (mirrors src/)
 dist/index.js               # Bundled output (committed)
 ```
@@ -128,7 +128,9 @@ appear as separate reviews - the natural "multiple times per PR" behavior.
 - LLM receives only: diff text, file paths, and (for summary) PR title/body.
   **Never** sends file contents beyond the diff hunks.
 - `GITHUB_API_URL` respected by Octokit automatically (GHES passthrough).
-- Workflow permissions: `pull-requests: write`, `contents: read`.
+- Workflow permissions: `pull-requests: write` + `contents: read`; summary mode
+  also needs `issues: write` because it posts via the issue-comments API
+  (`POST /repos/{o}/{r}/issues/{n}/comments`).
 
 ## Concurrency
 

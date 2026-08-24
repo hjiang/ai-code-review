@@ -1,0 +1,70 @@
+name: 'AI Code Review'
+description: 'LLM-powered PR summaries and inline code review comments using any OpenAI/Anthropic-compatible provider'
+inputs:
+  mode:
+    description: 'summary | review | both'
+    default: 'review'
+    required: false
+  github_token:
+    description: 'GitHub token with pull-requests: write'
+    default: '${{ github.token }}'
+    required: false
+  api_base_url:
+    description: 'LLM API base URL'
+    required: true
+  api_key:
+    description: 'LLM API key'
+    required: true
+  model:
+    description: 'Model name'
+    required: true
+  provider:
+    description: 'openai | anthropic | auto'
+    default: 'auto'
+    required: false
+  max_tokens:
+    description: 'Completion token budget'
+    default: '8192'
+    required: false
+  temperature:
+    description: 'Sampling temperature'
+    default: '0.2'
+    required: false
+  exclude:
+    description: 'Extra glob excludes (comma or newline separated)'
+    default: ''
+    required: false
+  max_files:
+    description: 'Maximum files reviewed per run'
+    default: '40'
+    required: false
+  max_patch_chars:
+    description: 'Total diff characters sent to the LLM'
+    default: '100000'
+    required: false
+  review_drafts:
+    description: 'Review draft PRs'
+    default: 'false'
+    required: false
+  comment_trigger:
+    description: 'Issue comment text that triggers a review'
+    default: '/review'
+    required: false
+  pr_number:
+    description: 'PR number (workflow_dispatch only)'
+    default: ''
+    required: false
+  fail_on_error:
+    description: 'Fail the workflow if the action errors'
+    default: 'false'
+    required: false
+outputs:
+  summary_posted:
+    description: '"true" if a summary comment was posted this run'
+  review_comment_count:
+    description: 'Number of inline comments posted'
+  files_reviewed:
+    description: 'Number of files reviewed'
+runs:
+  using: 'node24'
+  main: 'dist/index.js'

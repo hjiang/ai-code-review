@@ -31738,6 +31738,28 @@ class HttpError extends Error {
         this.name = 'HttpError';
     }
 }
+/**
+ * Thrown by adapters when the provider returns an empty/missing completion
+ * (e.g. `content: ""`). Distinct from `HttpError` and `LLMError` so the client
+ * can treat it specially: same-prompt HTTP retries rarely help, but a JSON
+ * re-ask nudge often recovers a real answer.
+ */
+class EmptyCompletionError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'EmptyCompletionError';
+    }
+}
+
+;// CONCATENATED MODULE: ./src/util/text.ts
+/**
+ * Small text helpers for diagnostics.
+ */
+/** One-line, newline-escaped, truncated view of arbitrary text for logs. */
+function excerpt(text, max = 600) {
+    const truncated = text.length > max ? `${text.slice(0, max)}…(+${text.length - max} more chars)` : text;
+    return JSON.stringify(truncated);
+}
 
 ;// CONCATENATED MODULE: ./src/llm/openai.ts
 /**
@@ -31745,18 +31767,19 @@ class HttpError extends Error {
  */
 
 
+
 /** Extract the assistant text from an OpenAI-shaped response. */
 function extractText(data) {
     const choice = data.choices?.[0];
     const content = choice?.message?.content ?? choice?.text;
     if (typeof content !== 'string') {
-        throw new Error('provider returned no completion content');
+        throw new EmptyCompletionError('provider returned no completion content');
     }
     if (content.trim().length === 0) {
-        // An empty completion is a transient provider glitch (e.g. a reasoning
-        // model that put everything in reasoning_content). Throw a non-LLMError so
-        // the caller retries the SAME prompt instead of re-asking about JSON.
-        throw new Error('provider returned empty completion content');
+        // An empty completion is a provider-side failure mode (e.g. a reasoning
+        // model that exhausted its budget or a gateway glitch). Keep the raw
+        // response diagnostic and let the caller re-ask with a JSON nudge.
+        throw new EmptyCompletionError('provider returned empty completion content');
     }
     return content;
 }
@@ -31804,7 +31827,16 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
     if (!res.ok) {
         throw new HttpError(res.status, (errorText ?? (await res.text())).slice(0, 500));
     }
-    return extractText((await res.json()));
+    const data = (await res.json());
+    try {
+        return extractText(data);
+    }
+    catch (err) {
+        // Surface the raw provider response (finish_reason, usage, reasoning
+        // fields) so an empty/missing completion is diagnosable in CI logs.
+        cfg.log?.(`llm: openai extraction failed (${err.message}); raw response: ${excerpt(JSON.stringify(data), 1500)}`);
+        throw err;
+    }
 }
 
 ;// CONCATENATED MODULE: ./src/llm/anthropic.ts
@@ -31813,16 +31845,17 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
  */
 
 
+
 const ANTHROPIC_VERSION = '2023-06-01';
 function anthropic_extractText(data) {
     const block = data.content?.find((b) => b.type === 'text');
     if (!block || typeof block.text !== 'string') {
-        throw new Error('provider returned no completion content');
+        throw new EmptyCompletionError('provider returned no completion content');
     }
     if (block.text.trim().length === 0) {
-        // See openai.ts extractText: empty completions are transient glitches and
-        // should be retried with the same prompt, not re-asked about JSON.
-        throw new Error('provider returned empty completion content');
+        // See openai.ts extractText: empty completions are a provider-side failure
+        // mode; keep the raw response diagnostic and let the caller re-ask.
+        throw new EmptyCompletionError('provider returned empty completion content');
     }
     return block.text;
 }
@@ -31862,7 +31895,14 @@ async function anthropicChat(cfg, messages, timeoutMs) {
     if (!res.ok) {
         throw new HttpError(res.status, (await res.text()).slice(0, 500));
     }
-    return anthropic_extractText((await res.json()));
+    const data = (await res.json());
+    try {
+        return anthropic_extractText(data);
+    }
+    catch (err) {
+        cfg.log?.(`llm: anthropic extraction failed (${err.message}); raw response: ${excerpt(JSON.stringify(data), 1500)}`);
+        throw err;
+    }
 }
 
 ;// CONCATENATED MODULE: ./src/llm/json.ts
@@ -31910,9 +31950,12 @@ function sleep(ms) {
  *
  * Dispatches to the OpenAI or Anthropic adapter based on `provider`, retries
  * transient HTTP failures (429/5xx/network) with exponential backoff, and
- * enforces the strict-JSON contract: on a non-JSON reply it re-asks once with
- * the parse error appended, then gives up with `LLMError`.
+ * enforces the strict-JSON contract: on a non-JSON or EMPTY reply it re-asks
+ * once with a JSON nudge appended, then gives up with `LLMError`. Empty
+ * completions skip same-prompt HTTP retries (they don't recover) and go
+ * straight to the re-ask, which has proven to recover real answers.
  */
+
 
 
 
@@ -31940,6 +31983,8 @@ async function chatOnce(cfg, messages, jsonMode, timeoutMs) {
 function isRetryable(err) {
     if (err instanceof HttpError)
         return err.status === 429 || err.status >= 500;
+    if (err instanceof EmptyCompletionError)
+        return false; // same-prompt retry didn't help; re-ask instead
     return !(err instanceof LLMError); // transient network/parse-agnostic errors
 }
 /**
@@ -31984,6 +32029,9 @@ async function requestWithRetry(cfg, messages, jsonMode) {
     if (lastErr instanceof HttpError) {
         throw new LLMError(`LLM HTTP ${lastErr.status}: ${lastErr.message}`);
     }
+    if (lastErr instanceof EmptyCompletionError) {
+        throw lastErr; // preserved so callLLM can recover via a JSON re-ask
+    }
     throw new LLMError(`LLM request failed: ${String(lastErr)}`);
 }
 /**
@@ -31998,8 +32046,30 @@ async function callLLM(cfg, messages) {
     const log = cfg.log ?? (() => { });
     let msgs = [...messages];
     const rawReplies = [];
-    for (let parseAttempt = 0; parseAttempt < MAX_PARSE_ATTEMPTS; parseAttempt++) {
-        const text = await requestWithRetry(cfg, msgs, jsonMode);
+    let retriedWithoutFormat = false;
+    let parseAttempt = 0;
+    while (parseAttempt < MAX_PARSE_ATTEMPTS) {
+        const effectiveMode = jsonMode === 'auto' && retriedWithoutFormat ? 'off' : jsonMode;
+        let text;
+        try {
+            text = await requestWithRetry(cfg, msgs, effectiveMode);
+        }
+        catch (err) {
+            if (!(err instanceof EmptyCompletionError))
+                throw err;
+            if (jsonMode === 'auto' && cfg.provider === 'openai' && !retriedWithoutFormat) {
+                // Reasoning models (e.g. deepseek-v4-flash) can burn the whole token
+                // budget on reasoning when `response_format: json_object` is sent,
+                // returning empty content with finish_reason=length. Retry the same
+                // prompt once WITHOUT response_format before re-asking — the provider
+                // then emits real JSON within budget.
+                retriedWithoutFormat = true;
+                log('llm: empty completion with response_format; retrying the same prompt without response_format');
+                continue; // same parse attempt, same messages, jsonMode off
+            }
+            log(`llm: attempt #${parseAttempt + 1} empty completion; re-asking with a JSON nudge`);
+            text = '';
+        }
         rawReplies.push(text);
         try {
             return extractJson(text);
@@ -32016,6 +32086,7 @@ async function callLLM(cfg, messages) {
                         content: `Your previous reply was not valid JSON: ${err.message}. Reply with JSON only.`
                     }
                 ];
+                parseAttempt++;
                 continue;
             }
             throw new LLMError(`LLM returned invalid JSON twice: ${err.message}. ` +
@@ -32023,11 +32094,6 @@ async function callLLM(cfg, messages) {
         }
     }
     throw new LLMError('unreachable');
-}
-/** One-line, newline-escaped, truncated view of a raw reply for diagnostics. */
-function excerpt(text, max = 600) {
-    const truncated = text.length > max ? `${text.slice(0, max)}…(+${text.length - max} more chars)` : text;
-    return JSON.stringify(truncated);
 }
 
 ;// CONCATENATED MODULE: ./src/context.ts
@@ -32083,6 +32149,10 @@ function loadConfig(reader) {
     if (modeInput !== 'summary' && modeInput !== 'review' && modeInput !== 'both') {
         throw new Error(`invalid mode "${modeInput}": expected summary | review | both`);
     }
+    const responseFormatInput = (reader.getInput('response_format') || 'auto').toLowerCase();
+    if (responseFormatInput !== 'auto' && responseFormatInput !== 'off') {
+        throw new Error(`invalid response_format "${responseFormatInput}": expected auto | off`);
+    }
     return {
         mode: modeInput,
         githubToken: reader.getInput('github_token'),
@@ -32092,6 +32162,7 @@ function loadConfig(reader) {
         provider: resolveProvider(reader.getInput('provider') || 'auto', baseUrl),
         maxTokens: intInput(reader, 'max_tokens', 8192),
         temperature: numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0),
+        responseFormat: responseFormatInput,
         exclude: splitPatterns(reader.getInput('exclude')),
         maxFiles: intInput(reader, 'max_files', 40),
         maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
@@ -32863,6 +32934,7 @@ async function main() {
         model: cfg.model,
         maxTokens: cfg.maxTokens,
         temperature: cfg.temperature,
+        jsonMode: cfg.responseFormat,
         log: (msg) => core.info(`ai-code-review: ${msg}`)
     };
     const endpoint = cfg.provider === 'anthropic' ? buildAnthropicUrl(cfg.baseUrl) : buildOpenAiUrl(cfg.baseUrl);

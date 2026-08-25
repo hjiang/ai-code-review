@@ -283,56 +283,104 @@ describe('callLLM — JSON re-ask', () => {
   });
 });
 
-describe('callLLM — empty completions are retried at the HTTP level', () => {
-  it('openai: retries an empty completion with the same prompt, then succeeds', async () => {
-    vi.useFakeTimers();
-    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+describe('callLLM — empty completions (reasoning-model budget burn)', () => {
+  it('openai: retries once without response_format, then succeeds (same messages)', async () => {
     const logs: string[] = [];
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(openAiOk(''))
-      .mockResolvedValueOnce(openAiOk('{"ok":1}'));
+      .mockResolvedValueOnce(openAiOk('')) // attempt (auto) → empty
+      .mockResolvedValueOnce(openAiOk('{"ok":1}')); // retry without response_format
     vi.stubGlobal('fetch', fetchMock);
-    const promise = callLLM({ ...baseCfg, log: (m) => logs.push(m) }, [
+    const result = await callLLM({ ...baseCfg, log: (m) => logs.push(m) }, [
       { role: 'user', content: 'hi' }
     ]);
-    const done = expect(promise).resolves.toEqual({ ok: 1 });
-    await vi.advanceTimersByTimeAsync(2000);
-    await done;
+    expect(result).toEqual({ ok: 1 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(logs[0]).toMatch(/attempt #1 failed .*empty completion/);
-    // The re-ask never happened: attempt 2 sends the same original messages.
-    const secondBody = jsonBody(fetchMock.mock.calls[1][1]);
-    expect(secondBody.messages).toEqual([{ role: 'user', content: 'hi' }]);
+    expect(jsonBody(fetchMock.mock.calls[0][1]).response_format).toEqual({ type: 'json_object' });
+    expect(jsonBody(fetchMock.mock.calls[1][1]).response_format).toBeUndefined();
+    // The retry sends the SAME original messages (no re-ask nudge yet).
+    expect(jsonBody(fetchMock.mock.calls[1][1]).messages).toEqual([{ role: 'user', content: 'hi' }]);
+    expect(logs.join('\n')).toMatch(/retrying the same prompt without response_format/);
   });
 
-  it('openai: gives up with a clear error after exhausting empty-completion retries', async () => {
-    vi.useFakeTimers();
-    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  it('openai: if still empty without response_format, recovers via the JSON re-ask nudge', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(openAiOk('')) // auto → empty
+      .mockResolvedValueOnce(openAiOk('')) // off → empty
+      .mockResolvedValueOnce(openAiOk('{"ok":1}')); // re-ask nudge → success
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await callLLM(baseCfg, [{ role: 'user', content: 'hi' }]);
+    expect(result).toEqual({ ok: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const thirdBody = jsonBody(fetchMock.mock.calls[2][1]);
+    expect(thirdBody.messages.at(-1).content).toMatch(/not valid JSON/);
+  });
+
+  it('openai: logs the raw provider response (finish_reason/usage) on empty content', async () => {
+    const logs: string[] = [];
+    const raw = {
+      id: 'chatcmpl-1',
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content: '', reasoning_content: 'thinking…' },
+          finish_reason: 'length'
+        }
+      ],
+      usage: { prompt_tokens: 100, completion_tokens: 8192, total_tokens: 8292 }
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, raw))
+      .mockResolvedValueOnce(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await callLLM({ ...baseCfg, log: (m) => logs.push(m) }, [{ role: 'user', content: 'hi' }]);
+    expect(logs[0]).toMatch(/openai extraction failed .*empty completion/);
+    expect(logs[0]).toContain('finish_reason');
+    expect(logs[0]).toContain('length');
+    expect(logs[0]).toContain('reasoning_content');
+    expect(logs[0]).toContain('completion_tokens');
+    expect(logs[0]).toContain('8192');
+  });
+
+  it('openai: gives up with invalid-JSON-twice (raw replies embedded) when every recovery fails', async () => {
     const fetchMock = vi.fn().mockImplementation(() => openAiOk('   '));
     vi.stubGlobal('fetch', fetchMock);
-    const promise = callLLM(baseCfg, [{ role: 'user', content: 'hi' }]);
-    const done = expect(promise).rejects.toThrow(/empty completion content/);
-    await vi.advanceTimersByTimeAsync(10000);
-    await done;
+    const err = (await callLLM(baseCfg, [{ role: 'user', content: 'hi' }]).catch((e) => e)) as Error;
+    expect(err).toBeInstanceOf(LLMError);
+    expect(String(err.message)).toMatch(/invalid JSON twice/);
+    // attempts: auto(empty) + off(empty) + re-ask(empty)
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('anthropic: retries an empty text block and succeeds', async () => {
-    vi.useFakeTimers();
-    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  it('openai: jsonMode off skips the response_format retry and re-asks directly', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(openAiOk('')) // off → empty
+      .mockResolvedValueOnce(openAiOk('{"ok":1}')); // re-ask nudge → success
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await callLLM({ ...baseCfg, jsonMode: 'off' }, [{ role: 'user', content: 'hi' }]);
+    expect(result).toEqual({ ok: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(jsonBody(fetchMock.mock.calls[0][1]).response_format).toBeUndefined();
+    const secondBody = jsonBody(fetchMock.mock.calls[1][1]);
+    expect(secondBody.messages.at(-1).content).toMatch(/not valid JSON/);
+  });
+
+  it('anthropic: an empty text block triggers the re-ask (no response_format involved) and succeeds', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(anthropicOk(''))
       .mockResolvedValueOnce(anthropicOk('{"ok":1}'));
     vi.stubGlobal('fetch', fetchMock);
-    const promise = callLLM({ ...baseCfg, provider: 'anthropic' }, [
+    const result = await callLLM({ ...baseCfg, provider: 'anthropic' }, [
       { role: 'user', content: 'hi' }
     ]);
-    const done = expect(promise).resolves.toEqual({ ok: 1 });
-    await vi.advanceTimersByTimeAsync(2000);
-    await done;
+    expect(result).toEqual({ ok: 1 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondBody = jsonBody(fetchMock.mock.calls[1][1]);
+    expect(secondBody.messages.at(-1).content).toMatch(/not valid JSON/);
   });
 });
 

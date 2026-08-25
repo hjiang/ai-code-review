@@ -27,6 +27,7 @@ describe('loadConfig', () => {
     expect(cfg.provider).toBe('openai');
     expect(cfg.maxTokens).toBe(8192);
     expect(cfg.temperature).toBe(0.2);
+    expect(cfg.responseFormat).toBe('auto');
     expect(cfg.exclude).toEqual([]);
     expect(cfg.maxFiles).toBe(40);
     expect(cfg.maxPatchChars).toBe(100000);
@@ -64,6 +65,12 @@ describe('loadConfig', () => {
     expect(() => loadConfig(reader({ mode: 'bogus' }))).toThrow(/mode/i);
     expect(loadConfig(reader({ mode: 'summary' })).mode).toBe('summary');
     expect(loadConfig(reader({ mode: 'both' })).mode).toBe('both');
+  });
+
+  it('parses and validates the response_format value', () => {
+    expect(loadConfig(reader()).responseFormat).toBe('auto');
+    expect(loadConfig(reader({ response_format: 'off' })).responseFormat).toBe('off');
+    expect(() => loadConfig(reader({ response_format: 'bogus' }))).toThrow(/response_format/i);
   });
 
   it('resolves the provider from an explicit input or auto', () => {

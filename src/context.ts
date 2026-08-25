@@ -9,6 +9,8 @@ import type { Provider } from './llm/types.js';
 
 export type Mode = 'summary' | 'review' | 'both';
 
+export type ResponseFormat = 'auto' | 'off';
+
 export interface ActionConfig {
   mode: Mode;
   githubToken: string;
@@ -18,6 +20,7 @@ export interface ActionConfig {
   provider: Provider;
   maxTokens: number;
   temperature: number;
+  responseFormat: ResponseFormat;
   exclude: string[];
   maxFiles: number;
   maxPatchChars: number;
@@ -98,6 +101,11 @@ export function loadConfig(reader: InputReader): ActionConfig {
     throw new Error(`invalid mode "${modeInput}": expected summary | review | both`);
   }
 
+  const responseFormatInput = (reader.getInput('response_format') || 'auto').toLowerCase();
+  if (responseFormatInput !== 'auto' && responseFormatInput !== 'off') {
+    throw new Error(`invalid response_format "${responseFormatInput}": expected auto | off`);
+  }
+
   return {
     mode: modeInput as Mode,
     githubToken: reader.getInput('github_token'),
@@ -107,6 +115,7 @@ export function loadConfig(reader: InputReader): ActionConfig {
     provider: resolveProvider(reader.getInput('provider') || 'auto', baseUrl),
     maxTokens: intInput(reader, 'max_tokens', 8192),
     temperature: numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0),
+    responseFormat: responseFormatInput as ResponseFormat,
     exclude: splitPatterns(reader.getInput('exclude')),
     maxFiles: intInput(reader, 'max_files', 40),
     maxPatchChars: intInput(reader, 'max_patch_chars', 100000),

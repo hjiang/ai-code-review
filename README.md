@@ -151,6 +151,7 @@ Anthropic adapter; everything else uses the OpenAI adapter. Override with the
 | `provider` | no | `auto` | `openai` \| `anthropic` \| `auto` |
 | `max_tokens` | no | `8192` | Completion budget |
 | `temperature` | no | `0.2` | |
+| `response_format` | no | `auto` | `auto` \| `off`. `auto` sends `response_format: json_object` and auto-retries without it on an empty/rejected completion; `off` never sends it. **Set `off` for reasoning models** (e.g. `deepseek-v4-flash`): with `json_object` they can burn the whole token budget on reasoning and return empty content.
 | `exclude` | no | built-ins | Extra glob excludes (comma/newline separated) |
 | `max_files` | no | `40` | Files per review run |
 | `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file patch cap) |
@@ -188,6 +189,13 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
 
 ## Notes & limitations
 
+- **Reasoning models**: some providers expose reasoning models (e.g.
+  `deepseek-v4-flash`) that return `content: ""` with `finish_reason: length`
+  when `response_format: json_object` is sent — they spend the whole token
+  budget "thinking" and never emit content. Set `response_format: off` in your
+  workflow for these models (the strict-JSON prompt + re-ask still enforce JSON
+  output). With the default `auto`, the action detects the empty completion and
+  retries the same prompt without `response_format` before re-asking.
 - **Repo context**: the LLM prompt includes repository metadata fetched from
   the GitHub API — `owner/repo`, **visibility (public/private)**, description,
   default branch, primary language, and fork/archived flags — so the model can

@@ -3,8 +3,9 @@
  */
 
 import { buildAnthropicUrl } from './url.js';
-import { HttpError } from './types.js';
+import { EmptyCompletionError, HttpError } from './types.js';
 import type { LLMConfig, LLMMessage } from './types.js';
+import { excerpt } from '../util/text.js';
 
 const ANTHROPIC_VERSION = '2023-06-01';
 
@@ -15,12 +16,12 @@ interface AnthropicResponse {
 function extractText(data: AnthropicResponse): string {
   const block = data.content?.find((b) => b.type === 'text');
   if (!block || typeof block.text !== 'string') {
-    throw new Error('provider returned no completion content');
+    throw new EmptyCompletionError('provider returned no completion content');
   }
   if (block.text.trim().length === 0) {
-    // See openai.ts extractText: empty completions are transient glitches and
-    // should be retried with the same prompt, not re-asked about JSON.
-    throw new Error('provider returned empty completion content');
+    // See openai.ts extractText: empty completions are a provider-side failure
+    // mode; keep the raw response diagnostic and let the caller re-ask.
+    throw new EmptyCompletionError('provider returned empty completion content');
   }
   return block.text;
 }
@@ -66,5 +67,11 @@ export async function anthropicChat(
   if (!res.ok) {
     throw new HttpError(res.status, (await res.text()).slice(0, 500));
   }
-  return extractText((await res.json()) as AnthropicResponse);
+  const data = (await res.json()) as AnthropicResponse;
+  try {
+    return extractText(data);
+  } catch (err) {
+    cfg.log?.(`llm: anthropic extraction failed (${(err as Error).message}); raw response: ${excerpt(JSON.stringify(data), 1500)}`);
+    throw err;
+  }
 }

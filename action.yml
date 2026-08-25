@@ -30,6 +30,10 @@ inputs:
     description: 'Sampling temperature'
     default: '0.2'
     required: false
+  response_format:
+    description: 'Send response_format json_object to the provider. auto: send it, retry once without it on an empty/rejected completion (recommended default; reasoning models may need it off). off: never send it.'
+    default: 'auto'
+    required: false
   exclude:
     description: 'Extra glob excludes (comma or newline separated)'
     default: ''

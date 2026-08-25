@@ -3,16 +3,19 @@
  *
  * Dispatches to the OpenAI or Anthropic adapter based on `provider`, retries
  * transient HTTP failures (429/5xx/network) with exponential backoff, and
- * enforces the strict-JSON contract: on a non-JSON reply it re-asks once with
- * the parse error appended, then gives up with `LLMError`.
+ * enforces the strict-JSON contract: on a non-JSON or EMPTY reply it re-asks
+ * once with a JSON nudge appended, then gives up with `LLMError`. Empty
+ * completions skip same-prompt HTTP retries (they don't recover) and go
+ * straight to the re-ask, which has proven to recover real answers.
  */
 
 import { openaiChat } from './openai.js';
 import { anthropicChat } from './anthropic.js';
 import { extractJson } from './json.js';
-import { HttpError, LLMError } from './types.js';
+import { EmptyCompletionError, HttpError, LLMError } from './types.js';
 import type { LLMConfig, LLMMessage, Provider } from './types.js';
 import { backoffMs, sleep } from '../util/retry.js';
+import { excerpt } from '../util/text.js';
 
 // Re-export the public error type so consumers import from the client entry.
 export { LLMError } from './types.js';
@@ -42,6 +45,7 @@ async function chatOnce(
 
 function isRetryable(err: unknown): boolean {
   if (err instanceof HttpError) return err.status === 429 || err.status >= 500;
+  if (err instanceof EmptyCompletionError) return false; // same-prompt retry didn't help; re-ask instead
   return !(err instanceof LLMError); // transient network/parse-agnostic errors
 }
 
@@ -88,6 +92,9 @@ async function requestWithRetry(
   if (lastErr instanceof HttpError) {
     throw new LLMError(`LLM HTTP ${lastErr.status}: ${lastErr.message}`);
   }
+  if (lastErr instanceof EmptyCompletionError) {
+    throw lastErr; // preserved so callLLM can recover via a JSON re-ask
+  }
   throw new LLMError(`LLM request failed: ${String(lastErr)}`);
 }
 
@@ -103,8 +110,30 @@ export async function callLLM(cfg: LLMConfig, messages: LLMMessage[]): Promise<u
   const log = cfg.log ?? (() => {});
   let msgs = [...messages];
   const rawReplies: string[] = [];
-  for (let parseAttempt = 0; parseAttempt < MAX_PARSE_ATTEMPTS; parseAttempt++) {
-    const text = await requestWithRetry(cfg, msgs, jsonMode);
+  let retriedWithoutFormat = false;
+  let parseAttempt = 0;
+  while (parseAttempt < MAX_PARSE_ATTEMPTS) {
+    const effectiveMode = jsonMode === 'auto' && retriedWithoutFormat ? 'off' : jsonMode;
+    let text: string;
+    try {
+      text = await requestWithRetry(cfg, msgs, effectiveMode);
+    } catch (err) {
+      if (!(err instanceof EmptyCompletionError)) throw err;
+      if (jsonMode === 'auto' && cfg.provider === 'openai' && !retriedWithoutFormat) {
+        // Reasoning models (e.g. deepseek-v4-flash) can burn the whole token
+        // budget on reasoning when `response_format: json_object` is sent,
+        // returning empty content with finish_reason=length. Retry the same
+        // prompt once WITHOUT response_format before re-asking — the provider
+        // then emits real JSON within budget.
+        retriedWithoutFormat = true;
+        log(
+          'llm: empty completion with response_format; retrying the same prompt without response_format'
+        );
+        continue; // same parse attempt, same messages, jsonMode off
+      }
+      log(`llm: attempt #${parseAttempt + 1} empty completion; re-asking with a JSON nudge`);
+      text = '';
+    }
     rawReplies.push(text);
     try {
       return extractJson(text);
@@ -122,6 +151,7 @@ export async function callLLM(cfg: LLMConfig, messages: LLMMessage[]): Promise<u
             content: `Your previous reply was not valid JSON: ${(err as Error).message}. Reply with JSON only.`
           }
         ];
+        parseAttempt++;
         continue;
       }
       throw new LLMError(
@@ -131,10 +161,4 @@ export async function callLLM(cfg: LLMConfig, messages: LLMMessage[]): Promise<u
     }
   }
   throw new LLMError('unreachable');
-}
-
-/** One-line, newline-escaped, truncated view of a raw reply for diagnostics. */
-export function excerpt(text: string, max = 600): string {
-  const truncated = text.length > max ? `${text.slice(0, max)}…(+${text.length - max} more chars)` : text;
-  return JSON.stringify(truncated);
 }

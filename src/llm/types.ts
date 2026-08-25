@@ -40,3 +40,16 @@ export class HttpError extends Error {
     this.name = 'HttpError';
   }
 }
+
+/**
+ * Thrown by adapters when the provider returns an empty/missing completion
+ * (e.g. `content: ""`). Distinct from `HttpError` and `LLMError` so the client
+ * can treat it specially: same-prompt HTTP retries rarely help, but a JSON
+ * re-ask nudge often recovers a real answer.
+ */
+export class EmptyCompletionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EmptyCompletionError';
+  }
+}

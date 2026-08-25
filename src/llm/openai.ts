@@ -3,8 +3,9 @@
  */
 
 import { buildOpenAiUrl } from './url.js';
-import { HttpError } from './types.js';
+import { EmptyCompletionError, HttpError } from './types.js';
 import type { LLMConfig, LLMMessage } from './types.js';
+import { excerpt } from '../util/text.js';
 
 interface OpenAIResponse {
   choices?: { message?: { content?: string }; text?: string }[];
@@ -15,13 +16,13 @@ function extractText(data: OpenAIResponse): string {
   const choice = data.choices?.[0];
   const content = choice?.message?.content ?? choice?.text;
   if (typeof content !== 'string') {
-    throw new Error('provider returned no completion content');
+    throw new EmptyCompletionError('provider returned no completion content');
   }
   if (content.trim().length === 0) {
-    // An empty completion is a transient provider glitch (e.g. a reasoning
-    // model that put everything in reasoning_content). Throw a non-LLMError so
-    // the caller retries the SAME prompt instead of re-asking about JSON.
-    throw new Error('provider returned empty completion content');
+    // An empty completion is a provider-side failure mode (e.g. a reasoning
+    // model that exhausted its budget or a gateway glitch). Keep the raw
+    // response diagnostic and let the caller re-ask with a JSON nudge.
+    throw new EmptyCompletionError('provider returned empty completion content');
   }
   return content;
 }
@@ -78,5 +79,13 @@ export async function openaiChat(
   if (!res.ok) {
     throw new HttpError(res.status, (errorText ?? (await res.text())).slice(0, 500));
   }
-  return extractText((await res.json()) as OpenAIResponse);
+  const data = (await res.json()) as OpenAIResponse;
+  try {
+    return extractText(data);
+  } catch (err) {
+    // Surface the raw provider response (finish_reason, usage, reasoning
+    // fields) so an empty/missing completion is diagnosable in CI logs.
+    cfg.log?.(`llm: openai extraction failed (${(err as Error).message}); raw response: ${excerpt(JSON.stringify(data), 1500)}`);
+    throw err;
+  }
 }

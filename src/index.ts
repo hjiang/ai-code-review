@@ -72,6 +72,7 @@ async function main(): Promise<void> {
     model: cfg.model,
     maxTokens: cfg.maxTokens,
     temperature: cfg.temperature,
+    jsonMode: cfg.responseFormat,
     log: (msg: string) => core.info(`ai-code-review: ${msg}`)
   };
   const endpoint =

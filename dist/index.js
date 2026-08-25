@@ -31960,6 +31960,12 @@ async function requestWithRetry(cfg, messages, jsonMode) {
             break;
         }
     }
+    if (lastErr === undefined) {
+        // The shared deadline was exhausted before any attempt could start (e.g.
+        // the clock jumped past the deadline between computation and the first
+        // attempt); surface a clear timeout instead of `LLM request failed: undefined`.
+        throw new LLMError(`LLM deadline exceeded after ${TOTAL_TIMEOUT_MS}ms`);
+    }
     if (lastErr instanceof HttpError) {
         throw new LLMError(`LLM HTTP ${lastErr.status}: ${lastErr.message}`);
     }
@@ -31967,17 +31973,25 @@ async function requestWithRetry(cfg, messages, jsonMode) {
 }
 /**
  * Ask the provider for structured JSON, re-asking once when the reply does not
- * parse. Returns the parsed value; throws `LLMError` on failure.
+ * parse. Returns the parsed value; throws `LLMError` on failure. Every failed
+ * parse attempt is surfaced (truncated raw reply) via `cfg.log` AND embedded
+ * in the final error so the failure is diagnosable in CI logs without leaking
+ * secrets (replies may carry user-code snippets, but never credentials).
  */
 async function callLLM(cfg, messages) {
     const jsonMode = cfg.jsonMode ?? 'auto';
+    const log = cfg.log ?? (() => { });
     let msgs = [...messages];
+    const rawReplies = [];
     for (let parseAttempt = 0; parseAttempt < MAX_PARSE_ATTEMPTS; parseAttempt++) {
         const text = await requestWithRetry(cfg, msgs, jsonMode);
+        rawReplies.push(text);
         try {
             return extractJson(text);
         }
         catch (err) {
+            log(`llm: attempt #${parseAttempt + 1} not strict JSON (${err.message}); ` +
+                `raw reply: ${excerpt(text)}`);
             if (parseAttempt < MAX_PARSE_ATTEMPTS - 1) {
                 msgs = [
                     ...msgs,
@@ -31989,10 +32003,16 @@ async function callLLM(cfg, messages) {
                 ];
                 continue;
             }
-            throw new LLMError(`LLM returned invalid JSON twice: ${err.message}`);
+            throw new LLMError(`LLM returned invalid JSON twice: ${err.message}. ` +
+                `Raw replies: [${rawReplies.map((r, i) => `#${i + 1}=${excerpt(r)}`).join(', ')}]`);
         }
     }
     throw new LLMError('unreachable');
+}
+/** One-line, newline-escaped, truncated view of a raw reply for diagnostics. */
+function excerpt(text, max = 600) {
+    const truncated = text.length > max ? `${text.slice(0, max)}…(+${text.length - max} more chars)` : text;
+    return JSON.stringify(truncated);
 }
 
 ;// CONCATENATED MODULE: ./src/context.ts
@@ -32754,6 +32774,7 @@ async function runSummary(cfg, ctx, prInfo, deps) {
 
 
 
+
 const reader = {
     getInput: (name) => core.getInput(name),
     setSecret: (value) => core.setSecret(value)
@@ -32796,8 +32817,11 @@ async function main() {
         apiKey: cfg.apiKey,
         model: cfg.model,
         maxTokens: cfg.maxTokens,
-        temperature: cfg.temperature
+        temperature: cfg.temperature,
+        log: (msg) => core.info(`ai-code-review: ${msg}`)
     };
+    const endpoint = cfg.provider === 'anthropic' ? buildAnthropicUrl(cfg.baseUrl) : buildOpenAiUrl(cfg.baseUrl);
+    core.info(`ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint}`);
     const llm = (messages) => callLLM(llmCfg, messages);
     let summaryPosted = false;
     let reviewCommentCount = 0;
@@ -32819,8 +32843,9 @@ async function main() {
 }
 main().catch((err) => {
     core.error(`ai-code-review: ${errMessage(err)}`);
-    if (err instanceof LLMError)
-        core.error(`(provider returned an error; check api_base_url/model/api_key)`);
+    if (err instanceof LLMError) {
+        core.error(`(hint: check api_base_url / model "${cfg?.model}" / api_key; the raw LLM replies are printed above)`);
+    }
     core.setOutput('summary_posted', 'false');
     core.setOutput('review_comment_count', '0');
     core.setOutput('files_reviewed', '0');

@@ -11,6 +11,7 @@ import type { ActionConfig, InputReader } from './context.js';
 import { getPr } from './github/reviews.js';
 import { callLLM, LLMError } from './llm/client.js';
 import type { LLMConfig, LLMMessage } from './llm/types.js';
+import { buildAnthropicUrl, buildOpenAiUrl } from './llm/url.js';
 import { runReview } from './review.js';
 import { runSummary } from './summarize.js';
 
@@ -69,8 +70,14 @@ async function main(): Promise<void> {
     apiKey: cfg.apiKey,
     model: cfg.model,
     maxTokens: cfg.maxTokens,
-    temperature: cfg.temperature
+    temperature: cfg.temperature,
+    log: (msg: string) => core.info(`ai-code-review: ${msg}`)
   };
+  const endpoint =
+    cfg.provider === 'anthropic' ? buildAnthropicUrl(cfg.baseUrl) : buildOpenAiUrl(cfg.baseUrl);
+  core.info(
+    `ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint}`
+  );
   const llm = (messages: LLMMessage[]) => callLLM(llmCfg, messages);
 
   let summaryPosted = false;
@@ -98,7 +105,11 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   core.error(`ai-code-review: ${errMessage(err)}`);
-  if (err instanceof LLMError) core.error(`(provider returned an error; check api_base_url/model/api_key)`);
+  if (err instanceof LLMError) {
+    core.error(
+      `(hint: check api_base_url / model "${cfg?.model}" / api_key; the raw LLM replies are printed above)`
+    );
+  }
   core.setOutput('summary_posted', 'false');
   core.setOutput('review_comment_count', '0');
   core.setOutput('files_reviewed', '0');

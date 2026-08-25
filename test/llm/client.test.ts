@@ -240,16 +240,46 @@ describe('callLLM — JSON re-ask', () => {
     expect(secondBody.messages.at(-1).content).toMatch(/not valid JSON/);
   });
 
-  it('throws LLMError after two invalid JSON replies', async () => {
+  it('throws LLMError after two invalid JSON replies, embedding both raw replies', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(openAiOk('still not json'))
       .mockResolvedValueOnce(openAiOk('still not json'));
     vi.stubGlobal('fetch', fetchMock);
-    await expect(callLLM(baseCfg, [{ role: 'user', content: 'hi' }])).rejects.toBeInstanceOf(
-      LLMError
-    );
+    const err = (await callLLM(baseCfg, [{ role: 'user', content: 'hi' }]).catch((e) => e)) as Error;
+    expect(err).toBeInstanceOf(LLMError);
+    expect(String(err.message)).toMatch(/invalid JSON twice/);
+    expect(String(err.message)).toContain('#1="still not json"');
+    expect(String(err.message)).toContain('#2="still not json"');
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports each failed parse attempt with the raw reply via the log callback', async () => {
+    const logs: string[] = [];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(openAiOk('sorry, no json here\nline two'))
+      .mockResolvedValueOnce(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await callLLM({ ...baseCfg, log: (m) => logs.push(m) }, [
+      { role: 'user', content: 'hi' }
+    ]);
+    expect(result).toEqual({ ok: 1 });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/attempt #1 not strict JSON/);
+    expect(logs[0]).toContain('sorry, no json here\\nline two');
+  });
+
+  it('truncates long raw replies in the logged excerpt', async () => {
+    const logs: string[] = [];
+    const long = 'x'.repeat(2000);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(openAiOk(long))
+      .mockResolvedValueOnce(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await callLLM({ ...baseCfg, log: (m) => logs.push(m) }, [{ role: 'user', content: 'hi' }]);
+    expect(logs[0]).toContain('(+1400 more chars)');
   });
 });
 

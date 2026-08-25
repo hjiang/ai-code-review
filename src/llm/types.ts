@@ -13,6 +13,8 @@ export interface LLMConfig {
   temperature: number;
   /** `auto`: send `response_format` and retry without it on 400; `off`: never. */
   jsonMode?: 'auto' | 'off';
+  /** Optional diagnostic sink (e.g. Actions `core.info`); receives non-secret LLM chatter. */
+  log?: (msg: string) => void;
 }
 
 export interface LLMMessage {

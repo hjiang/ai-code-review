@@ -89,16 +89,26 @@ async function requestWithRetry(
 
 /**
  * Ask the provider for structured JSON, re-asking once when the reply does not
- * parse. Returns the parsed value; throws `LLMError` on failure.
+ * parse. Returns the parsed value; throws `LLMError` on failure. Every failed
+ * parse attempt is surfaced (truncated raw reply) via `cfg.log` AND embedded
+ * in the final error so the failure is diagnosable in CI logs without leaking
+ * secrets (replies may carry user-code snippets, but never credentials).
  */
 export async function callLLM(cfg: LLMConfig, messages: LLMMessage[]): Promise<unknown> {
   const jsonMode = cfg.jsonMode ?? 'auto';
+  const log = cfg.log ?? (() => {});
   let msgs = [...messages];
+  const rawReplies: string[] = [];
   for (let parseAttempt = 0; parseAttempt < MAX_PARSE_ATTEMPTS; parseAttempt++) {
     const text = await requestWithRetry(cfg, msgs, jsonMode);
+    rawReplies.push(text);
     try {
       return extractJson(text);
     } catch (err) {
+      log(
+        `llm: attempt #${parseAttempt + 1} not strict JSON (${(err as Error).message}); ` +
+          `raw reply: ${excerpt(text)}`
+      );
       if (parseAttempt < MAX_PARSE_ATTEMPTS - 1) {
         msgs = [
           ...msgs,
@@ -110,8 +120,17 @@ export async function callLLM(cfg: LLMConfig, messages: LLMMessage[]): Promise<u
         ];
         continue;
       }
-      throw new LLMError(`LLM returned invalid JSON twice: ${(err as Error).message}`);
+      throw new LLMError(
+        `LLM returned invalid JSON twice: ${(err as Error).message}. ` +
+          `Raw replies: [${rawReplies.map((r, i) => `#${i + 1}=${excerpt(r)}`).join(', ')}]`
+      );
     }
   }
   throw new LLMError('unreachable');
+}
+
+/** One-line, newline-escaped, truncated view of a raw reply for diagnostics. */
+export function excerpt(text: string, max = 600): string {
+  const truncated = text.length > max ? `${text.slice(0, max)}…(+${text.length - max} more chars)` : text;
+  return JSON.stringify(truncated);
 }

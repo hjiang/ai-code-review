@@ -32239,8 +32239,13 @@ function loadContext(eventName, payload, reader, botLogin) {
             return null; // not a PR comment
         const comment = payload?.comment;
         const author = comment?.user?.login ?? '';
-        if (author && author.toLowerCase() === botLogin.toLowerCase())
-            return null; // loop guard
+        // Loop guard: drop only when the bot identity is KNOWN and matches the
+        // author. An empty botLogin means identity resolution failed (see
+        // resolveBotLogin) - the guard must stay inert (fail open) so a human
+        // /review command is processed rather than silently dropped.
+        if (botLogin !== '' && author && author.toLowerCase() === botLogin.toLowerCase()) {
+            return null;
+        }
         const trigger = reader.getInput('comment_trigger') || '/review';
         if (!comment?.body?.trim().startsWith(trigger))
             return null;
@@ -32333,6 +32338,42 @@ async function getRepo(octokit, owner, repo) {
         isFork: data.fork ?? false,
         isArchived: data.archived ?? false
     };
+}
+
+;// CONCATENATED MODULE: ./src/github/identity.ts
+/**
+ * Token identity resolution.
+ *
+ * `botLogin` is the account that authors the action's comments/reviews, used
+ * for the loop guard (drop the bot's own comments) and summary marker matching
+ * (exactly-once dedup). It MUST be the TOKEN identity (e.g. `github-actions[bot]`),
+ * never `github.context.actor` on `issue_comment` events: there the actor is the
+ * COMMENT AUTHOR, so an actor fallback would make the loop guard silently drop
+ * every human `/review` comment.
+ */
+/**
+ * Resolve the token's identity. On failure:
+ *  - `issue_comment`: return "" (unresolved) so the loop guard and marker
+ *    matching are inert - fail open, process the human command - rather than
+ *    misidentifying the comment author as the bot and swallowing `/review`.
+ *  - other events: fall back to the actor (historical behaviour).
+ */
+async function resolveBotLogin(octokit, eventName, actor, warn = () => { }) {
+    try {
+        const { data: me } = await octokit.rest.users.getAuthenticated();
+        if (me?.login)
+            return me.login;
+    }
+    catch (err) {
+        warn(`ai-code-review: could not resolve token identity (${err instanceof Error ? err.message : String(err)})`);
+    }
+    if (eventName === 'issue_comment') {
+        warn('ai-code-review: token identity unresolved on issue_comment; not using actor ' +
+            '(it is the comment author), loop guard disabled for this run');
+        return '';
+    }
+    warn('ai-code-review: token identity unresolved; falling back to actor');
+    return actor;
 }
 
 ;// CONCATENATED MODULE: ./src/diff.ts
@@ -32940,6 +32981,7 @@ async function runSummary(cfg, ctx, prInfo, repoInfo, deps) {
 
 
 
+
 const reader = {
     getInput: (name) => core.getInput(name),
     setSecret: (value) => core.setSecret(value)
@@ -32948,28 +32990,10 @@ function errMessage(err) {
     return err instanceof Error ? err.message : String(err);
 }
 let cfg;
-/**
- * Resolve the TOKEN identity (the account that authors comments/reviews), so
- * loop-guard and summary marker-match can compare against the bot itself.
- * On `issue_comment` events `github.context.actor` is the comment author, so
- * it must never be used as the bot identity. Falls back to the actor (old
- * behaviour) only if the token cannot be resolved.
- */
-async function resolveBotLogin(octokit) {
-    try {
-        const { data: me } = await octokit.rest.users.getAuthenticated();
-        if (me?.login)
-            return me.login;
-    }
-    catch (err) {
-        core.warning(`ai-code-review: could not resolve token identity (${errMessage(err)}); falling back to actor`);
-    }
-    return github.context.actor;
-}
 async function main() {
     cfg = loadConfig(reader);
     const octokit = github.getOctokit(cfg.githubToken);
-    const botLogin = await resolveBotLogin(octokit);
+    const botLogin = await resolveBotLogin(octokit, github.context.eventName, github.context.actor, (msg) => core.warning(msg));
     const ctx = loadContext(github.context.eventName, github.context.payload, reader, botLogin);
     if (!ctx) {
         core.info('ai-code-review: no actionable PR context, exiting silently');

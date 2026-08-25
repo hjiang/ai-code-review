@@ -187,7 +187,13 @@ export function loadContext(
     if (!issue?.number || !issue.pull_request) return null; // not a PR comment
     const comment = payload?.comment as { body?: string; user?: { login?: string } } | undefined;
     const author = comment?.user?.login ?? '';
-    if (author && author.toLowerCase() === botLogin.toLowerCase()) return null; // loop guard
+    // Loop guard: drop only when the bot identity is KNOWN and matches the
+    // author. An empty botLogin means identity resolution failed (see
+    // resolveBotLogin) - the guard must stay inert (fail open) so a human
+    // /review command is processed rather than silently dropped.
+    if (botLogin !== '' && author && author.toLowerCase() === botLogin.toLowerCase()) {
+      return null;
+    }
     const trigger = reader.getInput('comment_trigger') || '/review';
     if (!comment?.body?.trim().startsWith(trigger)) return null;
     return {

@@ -208,6 +208,20 @@ describe('loadContext', () => {
     expect(loadContext('issue_comment', payload, reader(), 'github-actions[bot]')).toBeNull();
   });
 
+  it('processes a human /review comment when the bot identity is unresolved (botLogin "")', () => {
+    // Regression: when getAuthenticated() fails on an issue_comment event,
+    // resolveBotLogin returns "" - the loop guard must be inert (fail open)
+    // so the human command is processed, never dropped.
+    const payload = {
+      ...basePayload,
+      issue: { number: 12, pull_request: { url: 'x' } },
+      comment: { body: '/review', user: { login: 'alice' } }
+    };
+    const ctx = loadContext('issue_comment', payload, reader(), '');
+    expect(ctx).not.toBeNull();
+    expect(ctx?.issueComment?.author).toBe('alice');
+  });
+
   it('does NOT drop a human /review comment even when the event actor matches the author', () => {
     // Regression: the loop guard must compare the comment author against the
     // TOKEN identity (botLogin), never against github.context.actor - on

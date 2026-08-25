@@ -152,6 +152,7 @@ Anthropic adapter; everything else uses the OpenAI adapter. Override with the
 | `max_tokens` | no | `8192` | Completion budget |
 | `temperature` | no | `0.2` | |
 | `response_format` | no | `auto` | `auto` \| `off`. `auto` sends `response_format: json_object` and auto-retries without it on an empty/rejected completion; `off` never sends it. **Set `off` for reasoning models** (e.g. `deepseek-v4-flash`): with `json_object` they can burn the whole token budget on reasoning and return empty content.
+| `extra_body` | no | — | Optional JSON object merged into the LLM request body (user keys win). For reasoning models that support it, disable thinking entirely: `{"thinking":{"type":"disabled"}}` (or reduce it: `{"reasoning_effort":"low"}`). Retried once without it if the provider rejects it with 400. |
 | `exclude` | no | built-ins | Extra glob excludes (comma/newline separated) |
 | `max_files` | no | `40` | Files per review run |
 | `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file patch cap) |
@@ -196,6 +197,13 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
   workflow for these models (the strict-JSON prompt + re-ask still enforce JSON
   output). With the default `auto`, the action detects the empty completion and
   retries the same prompt without `response_format` before re-asking.
+- **Thinking budget**: a reasoning model can also burn its budget on
+  `reasoning_content` alone (no `response_format` involved), especially on
+  large diffs, returning empty content. If your provider supports it, disable
+  thinking for reviews via `extra_body`:
+  `extra_body: '{"thinking":{"type":"disabled"}}'` (DeepSeek-style) or
+  `extra_body: '{"reasoning_effort":"low"}'` (OpenAI-style) — measured ~3s vs
+  ~60s per call on DeepSeek and eliminates the empty-content failure.
 - **Repo context**: the LLM prompt includes repository metadata fetched from
   the GitHub API — `owner/repo`, **visibility (public/private)**, description,
   default branch, primary language, and fork/archived flags — so the model can

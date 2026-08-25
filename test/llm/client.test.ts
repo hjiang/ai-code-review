@@ -92,6 +92,37 @@ describe('callLLM — openai adapter', () => {
     await callLLM({ ...baseCfg, jsonMode: 'off' }, [{ role: 'user', content: 'hi' }]);
     expect(jsonBody(fetchMock.mock.calls[0][1]).response_format).toBeUndefined();
   });
+
+  it('merges extra_body into the request body (user keys win)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await callLLM(
+      { ...baseCfg, extraBody: { thinking: { type: 'disabled' }, temperature: 0.9 } },
+      [{ role: 'user', content: 'hi' }]
+    );
+    const body = jsonBody(fetchMock.mock.calls[0][1]);
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    expect(body.temperature).toBe(0.9); // user value overrides the default 0.2
+    expect(body.max_tokens).toBe(8192);
+  });
+
+  it('retries once without extra_body when the provider rejects it with 400', async () => {
+    const logs: string[] = [];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(resp(400, { error: { message: 'unknown param thinking' } }))
+      .mockResolvedValueOnce(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await callLLM(
+      { ...baseCfg, extraBody: { thinking: { type: 'disabled' } }, log: (m) => logs.push(m) },
+      [{ role: 'user', content: 'hi' }]
+    );
+    expect(result).toEqual({ ok: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(jsonBody(fetchMock.mock.calls[0][1]).thinking).toEqual({ type: 'disabled' });
+    expect(jsonBody(fetchMock.mock.calls[1][1]).thinking).toBeUndefined();
+    expect(logs.join('\n')).toMatch(/extra_body/);
+  });
 });
 
 describe('callLLM — anthropic adapter', () => {

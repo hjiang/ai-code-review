@@ -28,6 +28,7 @@ describe('loadConfig', () => {
     expect(cfg.maxTokens).toBe(8192);
     expect(cfg.temperature).toBe(0.2);
     expect(cfg.responseFormat).toBe('auto');
+    expect(cfg.extraBody).toEqual({});
     expect(cfg.exclude).toEqual([]);
     expect(cfg.maxFiles).toBe(40);
     expect(cfg.maxPatchChars).toBe(100000);
@@ -71,6 +72,15 @@ describe('loadConfig', () => {
     expect(loadConfig(reader()).responseFormat).toBe('auto');
     expect(loadConfig(reader({ response_format: 'off' })).responseFormat).toBe('off');
     expect(() => loadConfig(reader({ response_format: 'bogus' }))).toThrow(/response_format/i);
+  });
+
+  it('parses extra_body as a JSON object and rejects invalid values', () => {
+    expect(
+      loadConfig(reader({ extra_body: '{"thinking":{"type":"disabled"}}' })).extraBody
+    ).toEqual({ thinking: { type: 'disabled' } });
+    expect(loadConfig(reader({ extra_body: '' })).extraBody).toEqual({});
+    expect(() => loadConfig(reader({ extra_body: 'not-json' }))).toThrow(/extra_body/i);
+    expect(() => loadConfig(reader({ extra_body: '[1,2]' }))).toThrow(/extra_body/i);
   });
 
   it('resolves the provider from an explicit input or auto', () => {

@@ -15,6 +15,7 @@ const cfg: ActionConfig = {
   maxTokens: 100,
   temperature: 0,
   responseFormat: 'auto',
+  extraBody: {},
   exclude: [],
   maxFiles: 40,
   maxPatchChars: 5000,

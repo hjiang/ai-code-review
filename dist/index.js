@@ -31808,6 +31808,8 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
     };
     if (jsonMode === 'auto')
         body.response_format = { type: 'json_object' };
+    if (cfg.extraBody)
+        Object.assign(body, cfg.extraBody); // user keys win
     const doFetch = () => fetch(url, {
         method: 'POST',
         headers,
@@ -31822,6 +31824,15 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
             delete body.response_format;
             res = await doFetch();
             errorText = null; // fresh body if the retry also failed
+        }
+        else if (cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
+            // The provider rejected a user-supplied extra param (e.g. this endpoint
+            // does not support thinking/reasoning controls); retry without it.
+            cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
+            for (const k of Object.keys(cfg.extraBody))
+                delete body[k];
+            res = await doFetch();
+            errorText = null;
         }
     }
     if (!res.ok) {
@@ -31882,6 +31893,8 @@ async function anthropicChat(cfg, messages, timeoutMs) {
     };
     if (system)
         body.system = system;
+    if (cfg.extraBody)
+        Object.assign(body, cfg.extraBody); // user keys win
     const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -32153,6 +32166,20 @@ function loadConfig(reader) {
     if (responseFormatInput !== 'auto' && responseFormatInput !== 'off') {
         throw new Error(`invalid response_format "${responseFormatInput}": expected auto | off`);
     }
+    const extraBodyRaw = reader.getInput('extra_body') || '';
+    let extraBody = {};
+    if (extraBodyRaw.trim()) {
+        try {
+            const parsed = JSON.parse(extraBodyRaw);
+            if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+                throw new Error('not a JSON object');
+            }
+            extraBody = parsed;
+        }
+        catch {
+            throw new Error(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
+        }
+    }
     return {
         mode: modeInput,
         githubToken: reader.getInput('github_token'),
@@ -32163,6 +32190,7 @@ function loadConfig(reader) {
         maxTokens: intInput(reader, 'max_tokens', 8192),
         temperature: numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0),
         responseFormat: responseFormatInput,
+        extraBody,
         exclude: splitPatterns(reader.getInput('exclude')),
         maxFiles: intInput(reader, 'max_files', 40),
         maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
@@ -32935,6 +32963,7 @@ async function main() {
         maxTokens: cfg.maxTokens,
         temperature: cfg.temperature,
         jsonMode: cfg.responseFormat,
+        extraBody: cfg.extraBody,
         log: (msg) => core.info(`ai-code-review: ${msg}`)
     };
     const endpoint = cfg.provider === 'anthropic' ? buildAnthropicUrl(cfg.baseUrl) : buildOpenAiUrl(cfg.baseUrl);

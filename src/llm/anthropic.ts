@@ -53,6 +53,7 @@ export async function anthropicChat(
     messages: chatMessages
   };
   if (system) body.system = system;
+  if (cfg.extraBody) Object.assign(body, cfg.extraBody); // user keys win
 
   const res = await fetch(url, {
     method: 'POST',

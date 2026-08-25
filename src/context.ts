@@ -21,6 +21,7 @@ export interface ActionConfig {
   maxTokens: number;
   temperature: number;
   responseFormat: ResponseFormat;
+  extraBody: Record<string, unknown>;
   exclude: string[];
   maxFiles: number;
   maxPatchChars: number;
@@ -106,6 +107,20 @@ export function loadConfig(reader: InputReader): ActionConfig {
     throw new Error(`invalid response_format "${responseFormatInput}": expected auto | off`);
   }
 
+  const extraBodyRaw = reader.getInput('extra_body') || '';
+  let extraBody: Record<string, unknown> = {};
+  if (extraBodyRaw.trim()) {
+    try {
+      const parsed = JSON.parse(extraBodyRaw);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('not a JSON object');
+      }
+      extraBody = parsed as Record<string, unknown>;
+    } catch {
+      throw new Error(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
+    }
+  }
+
   return {
     mode: modeInput as Mode,
     githubToken: reader.getInput('github_token'),
@@ -116,6 +131,7 @@ export function loadConfig(reader: InputReader): ActionConfig {
     maxTokens: intInput(reader, 'max_tokens', 8192),
     temperature: numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0),
     responseFormat: responseFormatInput as ResponseFormat,
+    extraBody,
     exclude: splitPatterns(reader.getInput('exclude')),
     maxFiles: intInput(reader, 'max_files', 40),
     maxPatchChars: intInput(reader, 'max_patch_chars', 100000),

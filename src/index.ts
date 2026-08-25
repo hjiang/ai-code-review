@@ -73,6 +73,7 @@ async function main(): Promise<void> {
     maxTokens: cfg.maxTokens,
     temperature: cfg.temperature,
     jsonMode: cfg.responseFormat,
+    extraBody: cfg.extraBody,
     log: (msg: string) => core.info(`ai-code-review: ${msg}`)
   };
   const endpoint =

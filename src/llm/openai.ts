@@ -57,6 +57,7 @@ export async function openaiChat(
     max_tokens: cfg.maxTokens
   };
   if (jsonMode === 'auto') body.response_format = { type: 'json_object' };
+  if (cfg.extraBody) Object.assign(body, cfg.extraBody); // user keys win
 
   const doFetch = (): Promise<Response> =>
     fetch(url, {
@@ -74,6 +75,13 @@ export async function openaiChat(
       delete body.response_format;
       res = await doFetch();
       errorText = null; // fresh body if the retry also failed
+    } else if (cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
+      // The provider rejected a user-supplied extra param (e.g. this endpoint
+      // does not support thinking/reasoning controls); retry without it.
+      cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
+      for (const k of Object.keys(cfg.extraBody)) delete body[k];
+      res = await doFetch();
+      errorText = null;
     }
   }
   if (!res.ok) {

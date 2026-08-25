@@ -34,6 +34,10 @@ inputs:
     description: 'Send response_format json_object to the provider. auto: send it, retry once without it on an empty/rejected completion (recommended default; reasoning models may need it off). off: never send it.'
     default: 'auto'
     required: false
+  extra_body:
+    description: 'Optional JSON object merged into the LLM request body (user keys win). E.g. deepseek reasoning models: {"thinking":{"type":"disabled"}} or {"reasoning_effort":"low"}. Retried once without it if the provider rejects it with 400.'
+    default: ''
+    required: false
   exclude:
     description: 'Extra glob excludes (comma or newline separated)'
     default: ''

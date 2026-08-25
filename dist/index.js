@@ -31752,6 +31752,12 @@ function extractText(data) {
     if (typeof content !== 'string') {
         throw new Error('provider returned no completion content');
     }
+    if (content.trim().length === 0) {
+        // An empty completion is a transient provider glitch (e.g. a reasoning
+        // model that put everything in reasoning_content). Throw a non-LLMError so
+        // the caller retries the SAME prompt instead of re-asking about JSON.
+        throw new Error('provider returned empty completion content');
+    }
     return content;
 }
 function isResponseFormatError(status, body) {
@@ -31812,6 +31818,11 @@ function anthropic_extractText(data) {
     const block = data.content?.find((b) => b.type === 'text');
     if (!block || typeof block.text !== 'string') {
         throw new Error('provider returned no completion content');
+    }
+    if (block.text.trim().length === 0) {
+        // See openai.ts extractText: empty completions are transient glitches and
+        // should be retried with the same prompt, not re-asked about JSON.
+        throw new Error('provider returned empty completion content');
     }
     return block.text;
 }
@@ -31950,6 +31961,10 @@ async function requestWithRetry(cfg, messages, jsonMode) {
         catch (err) {
             lastErr = err;
             if (isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {
+                // Log transient failures (incl. empty completions) so retries are
+                // visible in the workflow log; the reply body is already omitted from
+                // the message to keep it one-line and secret-free.
+                cfg.log?.(`llm: attempt #${attempt + 1} failed (${String(err)}), retrying`);
                 // Never sleep past the deadline: clamp the backoff to the remaining
                 // budget (skipping the sleep entirely when it is exhausted).
                 const wait = Math.min(backoffMs(attempt), deadline - Date.now());

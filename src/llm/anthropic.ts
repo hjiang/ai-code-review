@@ -17,6 +17,11 @@ function extractText(data: AnthropicResponse): string {
   if (!block || typeof block.text !== 'string') {
     throw new Error('provider returned no completion content');
   }
+  if (block.text.trim().length === 0) {
+    // See openai.ts extractText: empty completions are transient glitches and
+    // should be retried with the same prompt, not re-asked about JSON.
+    throw new Error('provider returned empty completion content');
+  }
   return block.text;
 }
 

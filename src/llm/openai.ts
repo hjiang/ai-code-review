@@ -17,6 +17,12 @@ function extractText(data: OpenAIResponse): string {
   if (typeof content !== 'string') {
     throw new Error('provider returned no completion content');
   }
+  if (content.trim().length === 0) {
+    // An empty completion is a transient provider glitch (e.g. a reasoning
+    // model that put everything in reasoning_content). Throw a non-LLMError so
+    // the caller retries the SAME prompt instead of re-asking about JSON.
+    throw new Error('provider returned empty completion content');
+  }
   return content;
 }
 

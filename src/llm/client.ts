@@ -66,6 +66,10 @@ async function requestWithRetry(
     } catch (err) {
       lastErr = err;
       if (isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {
+        // Log transient failures (incl. empty completions) so retries are
+        // visible in the workflow log; the reply body is already omitted from
+        // the message to keep it one-line and secret-free.
+        cfg.log?.(`llm: attempt #${attempt + 1} failed (${String(err)}), retrying`);
         // Never sleep past the deadline: clamp the backoff to the remaining
         // budget (skipping the sleep entirely when it is exhausted).
         const wait = Math.min(backoffMs(attempt), deadline - Date.now());

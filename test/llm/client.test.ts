@@ -283,6 +283,59 @@ describe('callLLM — JSON re-ask', () => {
   });
 });
 
+describe('callLLM — empty completions are retried at the HTTP level', () => {
+  it('openai: retries an empty completion with the same prompt, then succeeds', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const logs: string[] = [];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(openAiOk(''))
+      .mockResolvedValueOnce(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = callLLM({ ...baseCfg, log: (m) => logs.push(m) }, [
+      { role: 'user', content: 'hi' }
+    ]);
+    const done = expect(promise).resolves.toEqual({ ok: 1 });
+    await vi.advanceTimersByTimeAsync(2000);
+    await done;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(logs[0]).toMatch(/attempt #1 failed .*empty completion/);
+    // The re-ask never happened: attempt 2 sends the same original messages.
+    const secondBody = jsonBody(fetchMock.mock.calls[1][1]);
+    expect(secondBody.messages).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  it('openai: gives up with a clear error after exhausting empty-completion retries', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const fetchMock = vi.fn().mockImplementation(() => openAiOk('   '));
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = callLLM(baseCfg, [{ role: 'user', content: 'hi' }]);
+    const done = expect(promise).rejects.toThrow(/empty completion content/);
+    await vi.advanceTimersByTimeAsync(10000);
+    await done;
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('anthropic: retries an empty text block and succeeds', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(anthropicOk(''))
+      .mockResolvedValueOnce(anthropicOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = callLLM({ ...baseCfg, provider: 'anthropic' }, [
+      { role: 'user', content: 'hi' }
+    ]);
+    const done = expect(promise).resolves.toEqual({ ok: 1 });
+    await vi.advanceTimersByTimeAsync(2000);
+    await done;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('retry helpers', () => {
   it('backoffMs uses 2s/8s/32s with ±20% jitter', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5);

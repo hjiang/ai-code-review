@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { runReview, validateFindings } from '../src/review.js';
 import type { RawFinding } from '../src/review.js';
 import type { ActionConfig, PrContext } from '../src/context.js';
-import type { PrInfo } from '../src/github/reviews.js';
+import type { PrInfo, RepoInfo } from '../src/github/reviews.js';
 import type { PrFile } from '../src/diff.js';
 import type { MinimalOctokit } from '../src/github/types.js';
 
@@ -24,6 +24,15 @@ const cfg: ActionConfig = {
 };
 const ctx: PrContext = { owner: 'o', repo: 'r', prNumber: 7, botLogin: 'bot' };
 const prInfo: PrInfo = { commitId: 'sha', isDraft: false, title: 'T', body: '' };
+const repoInfo: RepoInfo = {
+  fullName: 'o/r',
+  visibility: 'private',
+  description: 'secret store',
+  defaultBranch: 'main',
+  language: 'TypeScript',
+  isFork: false,
+  isArchived: false
+};
 
 const PATCH = '@@ -1,2 +1,2 @@\n ctx\n+new\n'; // new-side anchors {1, 2}
 
@@ -164,7 +173,10 @@ describe('runReview', () => {
   it('skips draft PRs unless review_drafts is set', async () => {
     const octo = makeOctokit([file('src/a.ts')]);
     const llm = vi.fn();
-    const res = await runReview(cfg, ctx, { ...prInfo, isDraft: true }, { octokit: octo, llm });
+    const res = await runReview(cfg, ctx, { ...prInfo, isDraft: true }, repoInfo, {
+      octokit: octo,
+      llm
+    });
     expect(res.commentCount).toBe(0);
     expect(llm).not.toHaveBeenCalled();
     expect(octo.rest.pulls.createReview).not.toHaveBeenCalled();
@@ -173,7 +185,7 @@ describe('runReview', () => {
   it('posts a review noting nothing to review when all files are filtered', async () => {
     const octo = makeOctokit([{ filename: 'package-lock.json', status: 'modified', additions: 1, deletions: 0, changes: 1, patch: '…' }]);
     const llm = vi.fn();
-    const res = await runReview(cfg, ctx, prInfo, { octokit: octo, llm });
+    const res = await runReview(cfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
     expect(res).toEqual({ commentCount: 0, filesReviewed: 0 });
     expect(llm).not.toHaveBeenCalled();
     expect(octo.rest.pulls.createReview).toHaveBeenCalledWith(
@@ -186,7 +198,7 @@ describe('runReview', () => {
     const llm = vi.fn(async () => ({
       findings: [{ path: 'src/a.ts', line: 2, severity: 'warning', category: 'correctness', comment_md: '**issue**' }]
     }));
-    const res = await runReview(cfg, ctx, prInfo, { octokit: octo, llm });
+    const res = await runReview(cfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
     expect(res.commentCount).toBe(1);
     expect(res.filesReviewed).toBe(1);
     expect(llm).toHaveBeenCalledTimes(1);
@@ -210,7 +222,7 @@ describe('runReview', () => {
     }));
     // Budget fits one 26-char patch per chunk but not two -> 2 chunks, no drops.
     const smallCfg = { ...cfg, maxPatchChars: 30 };
-    const res = await runReview(smallCfg, ctx, prInfo, { octokit: octo, llm });
+    const res = await runReview(smallCfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
     expect(res.commentCount).toBe(2);
     expect(llm).toHaveBeenCalledTimes(2);
     const payload = (octo.rest.pulls.createReview as ReturnType<typeof vi.fn>).mock.calls[0][0];
@@ -220,7 +232,7 @@ describe('runReview', () => {
   it('treats a malformed findings field as no findings rather than crashing', async () => {
     const octo = makeOctokit([file('src/a.ts')]);
     const llm = vi.fn(async () => ({ findings: 'oops' }));
-    const res = await runReview(cfg, ctx, prInfo, { octokit: octo, llm });
+    const res = await runReview(cfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
     expect(res.commentCount).toBe(0);
     expect(octo.rest.pulls.createReview).toHaveBeenCalledWith(
       expect.objectContaining({ comments: [] })
@@ -234,7 +246,7 @@ describe('runReview', () => {
     const octo = makeOctokit([file('src/big.ts', bigPatch)]);
     const llm = vi.fn(async () => ({ findings: [] }));
     const bigCfg = { ...cfg, maxPatchChars: 100000 };
-    const res = await runReview(bigCfg, ctx, prInfo, { octokit: octo, llm });
+    const res = await runReview(bigCfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
     expect(llm).toHaveBeenCalled();
     expect(res.filesReviewed).toBe(1);
   });

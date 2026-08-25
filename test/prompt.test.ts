@@ -1,6 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { buildReviewMessages, buildSummaryMessages, SUMMARY_MARKER } from '../src/prompt.js';
+import {
+  buildRepoContext,
+  buildReviewMessages,
+  buildSummaryMessages,
+  SUMMARY_MARKER
+} from '../src/prompt.js';
 import type { PrFile } from '../src/diff.js';
+import type { RepoInfo } from '../src/github/reviews.js';
+
+const repo: RepoInfo = {
+  fullName: 'acme/widgets',
+  visibility: 'private',
+  description: 'Widget catalog API',
+  defaultBranch: 'main',
+  language: 'TypeScript',
+  isFork: false,
+  isArchived: false
+};
 
 function file(filename: string, patch = '@@ -1,2 +1,2 @@\n keep\n+added\n'): PrFile {
   return { filename, status: 'modified', additions: 1, deletions: 0, changes: 1, patch };
@@ -12,38 +28,74 @@ describe('SUMMARY_MARKER', () => {
   });
 });
 
+describe('buildRepoContext', () => {
+  it('renders one fact per line including visibility', () => {
+    const ctx = buildRepoContext(repo);
+    expect(ctx).toContain('repo: acme/widgets');
+    expect(ctx).toContain('visibility: private');
+    expect(ctx).toContain('description: Widget catalog API');
+    expect(ctx).toContain('default branch: main');
+    expect(ctx).toContain('primary language: TypeScript');
+    expect(ctx).toContain('fork: no');
+  });
+
+  it('omits an empty description and marks unknown fields', () => {
+    const ctx = buildRepoContext({
+      fullName: 'a/b',
+      visibility: 'public',
+      description: '',
+      defaultBranch: '',
+      language: null,
+      isFork: true,
+      isArchived: true
+    });
+    expect(ctx).not.toContain('description:');
+    expect(ctx).toContain('default branch: (unknown)');
+    expect(ctx).toContain('primary language: (unknown)');
+    expect(ctx).toContain('fork: yes');
+    expect(ctx).toContain('archived: yes');
+  });
+});
+
 describe('buildSummaryMessages', () => {
   const pr = { title: 'Add login flow', body: 'Implements OAuth login.\n\nCloses #12.' };
   const files = [file('src/auth.ts'), file('src/login.ts', '@@ -1 +1 @@\n+new\n')];
 
   it('returns a system + user pair', () => {
-    const msgs = buildSummaryMessages(pr, files, 100000);
+    const msgs = buildSummaryMessages(pr, files, 100000, repo);
     expect(msgs).toHaveLength(2);
     expect(msgs[0].role).toBe('system');
     expect(msgs[1].role).toBe('user');
   });
 
   it('includes the summary_md JSON schema in the system prompt', () => {
-    const [system] = buildSummaryMessages(pr, files, 100000);
+    const [system] = buildSummaryMessages(pr, files, 100000, repo);
     expect(system.content).toContain('summary_md');
   });
 
   it('includes PR metadata and the changed-file list in the user message', () => {
-    const [, user] = buildSummaryMessages(pr, files, 100000);
+    const [, user] = buildSummaryMessages(pr, files, 100000, repo);
     expect(user.content).toContain('Add login flow');
     expect(user.content).toContain('Implements OAuth login');
     expect(user.content).toContain('src/auth.ts');
     expect(user.content).toContain('src/login.ts');
   });
 
+  it('includes the repo context (visibility) in the user message', () => {
+    const [, user] = buildSummaryMessages(pr, files, 100000, repo);
+    expect(user.content).toContain('Repository context:');
+    expect(user.content).toContain('visibility: private');
+    expect(user.content).toContain('acme/widgets');
+  });
+
   it('includes the diff patches in the user message', () => {
-    const [, user] = buildSummaryMessages(pr, files, 100000);
+    const [, user] = buildSummaryMessages(pr, files, 100000, repo);
     expect(user.content).toContain('+added');
     expect(user.content).toContain('+new');
   });
 
   it('respects the max patch-char budget with a truncation marker', () => {
-    const [, user] = buildSummaryMessages(pr, files, 120);
+    const [, user] = buildSummaryMessages(pr, files, 120, repo);
     expect(user.content.length).toBeLessThanOrEqual(500); // header slack, not the full budget
     expect(user.content).toMatch(/truncated/i);
     // the budget applies to the diff section; header/metadata may exceed it
@@ -56,12 +108,12 @@ describe('buildReviewMessages', () => {
   const files = [file('src/auth.ts', '@@ -1 +1 @@\n+const t = getToken(req);\n')];
 
   it('returns a system + user pair', () => {
-    const msgs = buildReviewMessages(files, 100000);
+    const msgs = buildReviewMessages(files, 100000, repo);
     expect(msgs.map((m) => m.role)).toEqual(['system', 'user']);
   });
 
   it('documents the findings schema and severity enum in the system prompt', () => {
-    const [system] = buildReviewMessages(files, 100000);
+    const [system] = buildReviewMessages(files, 100000, repo);
     expect(system.content).toContain('findings');
     expect(system.content).toContain('critical');
     expect(system.content).toContain('warning');
@@ -71,23 +123,29 @@ describe('buildReviewMessages', () => {
   });
 
   it('includes a few-shot example finding', () => {
-    const [system] = buildReviewMessages(files, 100000);
+    const [system] = buildReviewMessages(files, 100000, repo);
     expect(system.content.toLowerCase()).toContain('example');
   });
 
   it('tells the model to cite NEW-side line numbers', () => {
-    const [system] = buildReviewMessages(files, 100000);
+    const [system] = buildReviewMessages(files, 100000, repo);
     expect(system.content).toMatch(/new side/i);
   });
 
   it('puts the file list and patches in the user message', () => {
-    const [, user] = buildReviewMessages(files, 100000);
+    const [, user] = buildReviewMessages(files, 100000, repo);
     expect(user.content).toContain('src/auth.ts');
     expect(user.content).toContain('getToken(req)');
   });
 
+  it('prepends the repo context to the review user message', () => {
+    const [, user] = buildReviewMessages(files, 100000, repo);
+    expect(user.content.startsWith('Repository context:')).toBe(true);
+    expect(user.content).toContain('visibility: private');
+  });
+
   it('respects the max patch-char budget with a truncation marker', () => {
-    const [, user] = buildReviewMessages(files, 80);
+    const [, user] = buildReviewMessages(files, 80, repo);
     const diffIdx = user.content.indexOf('Diffs:');
     expect(user.content.length - diffIdx).toBeLessThanOrEqual(80 + 200);
     expect(user.content).toMatch(/truncated/i);

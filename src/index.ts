@@ -8,7 +8,7 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { loadConfig, loadContext } from './context.js';
 import type { ActionConfig, InputReader } from './context.js';
-import { getPr } from './github/reviews.js';
+import { getPr, getRepo } from './github/reviews.js';
 import { callLLM, LLMError } from './llm/client.js';
 import type { LLMConfig, LLMMessage } from './llm/types.js';
 import { buildAnthropicUrl, buildOpenAiUrl } from './llm/url.js';
@@ -63,6 +63,7 @@ async function main(): Promise<void> {
   }
 
   const prInfo = await getPr(octokit, ctx.owner, ctx.repo, ctx.prNumber);
+  const repoInfo = await getRepo(octokit, ctx.owner, ctx.repo);
 
   const llmCfg: LLMConfig = {
     provider: cfg.provider,
@@ -85,12 +86,12 @@ async function main(): Promise<void> {
   let filesReviewed = 0;
 
   if (cfg.mode === 'summary' || cfg.mode === 'both') {
-    const result = await runSummary(cfg, ctx, prInfo, { octokit, llm });
+    const result = await runSummary(cfg, ctx, prInfo, repoInfo, { octokit, llm });
     summaryPosted = result.posted;
     filesReviewed = result.filesReviewed;
   }
   if (cfg.mode === 'review' || cfg.mode === 'both') {
-    const result = await runReview(cfg, ctx, prInfo, { octokit, llm });
+    const result = await runReview(cfg, ctx, prInfo, repoInfo, { octokit, llm });
     reviewCommentCount = result.commentCount;
     filesReviewed = result.filesReviewed;
   }

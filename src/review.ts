@@ -8,7 +8,7 @@ import { chunkFiles, filterFiles } from './filter.js';
 import { buildReviewMessages } from './prompt.js';
 import { postReview } from './github/reviews.js';
 import type { ActionConfig, PrContext } from './context.js';
-import type { PrInfo } from './github/reviews.js';
+import type { PrInfo, RepoInfo } from './github/reviews.js';
 import type { PrFile } from './diff.js';
 import type { MinimalOctokit, InlineComment } from './github/types.js';
 import type { LLMMessage } from './llm/types.js';
@@ -146,6 +146,7 @@ export async function runReview(
   cfg: ActionConfig,
   ctx: PrContext,
   prInfo: PrInfo,
+  repoInfo: RepoInfo,
   deps: ReviewDeps
 ): Promise<ReviewResult> {
   const log = deps.log ?? ((msg: string) => console.log(msg));
@@ -175,7 +176,7 @@ export async function runReview(
   const chunks = chunkFiles(kept, cfg.maxPatchChars);
   const rawFindings: RawFinding[] = [];
   for (const chunk of chunks) {
-    const messages = buildReviewMessages(chunk, cfg.maxPatchChars);
+    const messages = buildReviewMessages(chunk, cfg.maxPatchChars, repoInfo);
     const result = (await deps.llm(messages)) as { findings?: unknown };
     if (Array.isArray(result?.findings)) {
       rawFindings.push(...(result.findings as RawFinding[]));

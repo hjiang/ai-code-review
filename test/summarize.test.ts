@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { runSummary } from '../src/summarize.js';
 import type { ActionConfig, PrContext } from '../src/context.js';
-import type { PrInfo } from '../src/github/reviews.js';
+import type { PrInfo, RepoInfo } from '../src/github/reviews.js';
 import type { LLMMessage } from '../src/llm/types.js';
 import type { MinimalOctokit } from '../src/github/types.js';
 
@@ -24,6 +24,15 @@ const cfg: ActionConfig = {
 
 const ctx: PrContext = { owner: 'o', repo: 'r', prNumber: 7, botLogin: 'bot' };
 const prInfo: PrInfo = { commitId: 'sha', isDraft: false, title: 'Add X', body: 'Does Y' };
+const repoInfo: RepoInfo = {
+  fullName: 'o/r',
+  visibility: 'public',
+  description: 'open source',
+  defaultBranch: 'main',
+  language: 'Go',
+  isFork: false,
+  isArchived: false
+};
 
 const apiFile = (filename: string) => ({
   filename,
@@ -51,6 +60,9 @@ function makeOctokit(over: Partial<MinimalOctokit['rest']> = {}): MinimalOctokit
         createReview: vi.fn(async () => ({})),
         get: vi.fn()
       },
+      repos: {
+        get: vi.fn(async () => ({ data: {} }))
+      },
       ...over
     }
   };
@@ -60,7 +72,7 @@ describe('runSummary', () => {
   it('skips draft PRs unless review_drafts is set', async () => {
     const octo = makeOctokit();
     const llm = vi.fn();
-    const res = await runSummary(cfg, ctx, { ...prInfo, isDraft: true }, {
+    const res = await runSummary(cfg, ctx, { ...prInfo, isDraft: true }, repoInfo, {
       octokit: octo,
       llm
     });
@@ -79,7 +91,7 @@ describe('runSummary', () => {
       }
     });
     const llm = vi.fn();
-    const res = await runSummary(cfg, ctx, prInfo, { octokit: octo, llm });
+    const res = await runSummary(cfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
     expect(res.posted).toBe(false);
     expect(llm).not.toHaveBeenCalled();
     expect(octo.rest.issues.createComment).not.toHaveBeenCalled();
@@ -88,7 +100,7 @@ describe('runSummary', () => {
   it('posts a marker-prefixed summary comment on the happy path', async () => {
     const octo = makeOctokit();
     const llm = vi.fn(async () => ({ summary_md: '**Summary** text' }));
-    const res = await runSummary(cfg, ctx, prInfo, { octokit: octo, llm });
+    const res = await runSummary(cfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
     expect(res.posted).toBe(true);
     expect(llm).toHaveBeenCalledTimes(1);
     const [messages] = llm.mock.calls[0] as unknown as [LLMMessage[]];
@@ -104,9 +116,9 @@ describe('runSummary', () => {
   it('throws when the LLM result has no summary_md field', async () => {
     const octo = makeOctokit();
     const llm = vi.fn(async () => ({ somethingElse: 1 }));
-    await expect(
-      runSummary(cfg, ctx, prInfo, { octokit: octo, llm })
-    ).rejects.toThrow(/summary_md/);
+    await expect(runSummary(cfg, ctx, prInfo, repoInfo, { octokit: octo, llm })).rejects.toThrow(
+      /summary_md/
+    );
   });
 
   it('forwards cfg.maxPatchChars to the per-file patch cap', async () => {
@@ -122,7 +134,7 @@ describe('runSummary', () => {
     });
     const llm = vi.fn(async () => ({ summary_md: 'ok' }));
     const bigCfg = { ...cfg, maxPatchChars: 100000 };
-    const res = await runSummary(bigCfg, ctx, prInfo, { octokit: octo, llm });
+    const res = await runSummary(bigCfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
     expect(res.posted).toBe(true);
     expect(res.filesReviewed).toBe(1);
   });

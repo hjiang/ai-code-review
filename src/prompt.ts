@@ -4,6 +4,7 @@
  */
 
 import type { PrFile } from './diff.js';
+import type { RepoInfo } from './github/reviews.js';
 
 export const SUMMARY_MARKER = '<!-- ai-review:summary -->';
 
@@ -15,6 +16,21 @@ export interface PrSummaryInfo {
 interface Msg {
   role: 'system' | 'user';
   content: string;
+}
+
+/** One-line-per-fact repo context block included in every LLM user message. */
+export function buildRepoContext(info: RepoInfo): string {
+  const lines = [
+    'Repository context:',
+    `- repo: ${info.fullName}`,
+    `- visibility: ${info.visibility}`,
+    info.description ? `- description: ${info.description}` : null,
+    `- default branch: ${info.defaultBranch || '(unknown)'}`,
+    `- primary language: ${info.language ?? '(unknown)'}`,
+    `- fork: ${info.isFork ? 'yes' : 'no'}`,
+    `- archived: ${info.isArchived ? 'yes' : 'no'}`
+  ];
+  return lines.filter((l): l is string => l !== null).join('\n');
 }
 
 const SUMMARY_SYSTEM = `You are a senior software engineer writing a concise, insightful summary of a pull request for the reviewers.
@@ -63,9 +79,12 @@ function buildFileSection(files: PrFile[], maxChars: number): string {
 export function buildSummaryMessages(
   pr: PrSummaryInfo,
   files: PrFile[],
-  maxPatchChars: number
+  maxPatchChars: number,
+  repo: RepoInfo
 ): Msg[] {
   const user = [
+    buildRepoContext(repo),
+    '',
     `PR title: ${pr.title}`,
     `PR description:\n${pr.body || '(none)'}`,
     '',
@@ -78,8 +97,12 @@ export function buildSummaryMessages(
 }
 
 /** Messages for an inline review run. */
-export function buildReviewMessages(files: PrFile[], maxPatchChars: number): Msg[] {
-  const user = buildFileSection(files, maxPatchChars);
+export function buildReviewMessages(
+  files: PrFile[],
+  maxPatchChars: number,
+  repo: RepoInfo
+): Msg[] {
+  const user = [buildRepoContext(repo), '', buildFileSection(files, maxPatchChars)].join('\n');
   return [
     { role: 'system', content: REVIEW_SYSTEM },
     { role: 'user', content: user }

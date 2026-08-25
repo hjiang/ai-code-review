@@ -188,6 +188,11 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
 
 ## Notes & limitations
 
+- **Repo context**: the LLM prompt includes repository metadata fetched from
+  the GitHub API — `owner/repo`, **visibility (public/private)**, description,
+  default branch, primary language, and fork/archived flags — so the model can
+  weigh findings accordingly (e.g. a leaked credential is more severe in a
+  public repo). No extra inputs are required.
 - **Fork PRs**: with the default `GITHUB_TOKEN`, workflows from forks get a
   read-only token, so inline reviews won't be posted. Use a fine-grained PAT or
   GitHub App token for public repos (same limitation Copilot-style bots hit).

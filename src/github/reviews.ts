@@ -17,6 +17,17 @@ export interface PrInfo {
   body: string;
 }
 
+/** Repository metadata surfaced to the LLM (public/private visibility etc.). */
+export interface RepoInfo {
+  fullName: string;
+  visibility: 'public' | 'private' | 'internal' | 'unknown';
+  description: string;
+  defaultBranch: string;
+  language: string | null;
+  isFork: boolean;
+  isArchived: boolean;
+}
+
 function is422(err: unknown): boolean {
   return (err as { status?: number })?.status === 422;
 }
@@ -82,5 +93,23 @@ export async function getPr(
     isDraft: data.draft,
     title: data.title,
     body: data.body ?? ''
+  };
+}
+
+/** Fetch repository metadata (visibility, description, language, …). */
+export async function getRepo(
+  octokit: MinimalOctokit,
+  owner: string,
+  repo: string
+): Promise<RepoInfo> {
+  const { data } = await octokit.rest.repos.get({ owner, repo });
+  return {
+    fullName: data.full_name ?? `${owner}/${repo}`,
+    visibility: data.visibility ?? (data.private ? 'private' : 'public'),
+    description: data.description ?? '',
+    defaultBranch: data.default_branch ?? '',
+    language: data.language ?? null,
+    isFork: data.fork ?? false,
+    isArchived: data.archived ?? false
   };
 }

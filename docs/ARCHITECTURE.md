@@ -111,7 +111,9 @@ appear as separate reviews - the natural "multiple times per PR" behavior.
   - Post: union of `newLines` across hunks = exactly the set of valid RIGHT-side
     anchor lines for that file.
 - `buildSummaryPrompt(files)` / `buildReviewPrompt(files)` -> messages
-  - Post: total content ≤ `max_patch_chars`; includes file stats and patches.
+  - Post: total content ≤ `max_patch_chars`; includes file stats, patches, and
+    the repository context block (visibility, description, default branch,
+    primary language, fork/archived flags) fetched via `GET /repos/{o}/{r}`.
 - `callLLM(config, messages, schemaHint)` -> `unknown` (parsed JSON)
   - Retries 429/5xx (backoff 2s/8s/32s); on non-JSON response, re-asks once
     with the parse error appended; throws `LLMError` after 2 parse failures.
@@ -125,8 +127,9 @@ appear as separate reviews - the natural "multiple times per PR" behavior.
 ## Configuration & security
 
 - `api_key` always from secrets; never echoed (core.setSecret).
-- LLM receives only: diff text, file paths, and (for summary) PR title/body.
-  **Never** sends file contents beyond the diff hunks.
+- LLM receives only: diff text, file paths, repo metadata (name, visibility,
+  description, default branch, language, fork/archived), and (for summary) PR
+  title/body. **Never** sends file contents beyond the diff hunks.
 - `GITHUB_API_URL` respected by Octokit automatically (GHES passthrough).
 - Workflow permissions: `pull-requests: write` + `contents: read`; summary mode
   also needs `issues: write` because it posts via the issue-comments API

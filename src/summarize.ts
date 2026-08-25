@@ -7,7 +7,7 @@ import { fetchPrFiles } from './diff.js';
 import { filterFiles } from './filter.js';
 import { buildSummaryMessages, SUMMARY_MARKER } from './prompt.js';
 import type { ActionConfig, PrContext } from './context.js';
-import type { PrInfo } from './github/reviews.js';
+import type { PrInfo, RepoInfo } from './github/reviews.js';
 import type { MinimalOctokit } from './github/types.js';
 import type { LLMMessage } from './llm/types.js';
 
@@ -31,6 +31,7 @@ export async function runSummary(
   cfg: ActionConfig,
   ctx: PrContext,
   prInfo: PrInfo,
+  repoInfo: RepoInfo,
   deps: SummaryDeps
 ): Promise<SummaryResult> {
   const log = deps.log ?? ((msg: string) => console.log(msg));
@@ -63,7 +64,8 @@ export async function runSummary(
   const messages = buildSummaryMessages(
     { title: prInfo.title, body: prInfo.body },
     kept,
-    cfg.maxPatchChars
+    cfg.maxPatchChars,
+    repoInfo
   );
   const result = await deps.llm(messages);
   const summaryMd = (result as { summary_md?: unknown })?.summary_md;

@@ -27,5 +27,8 @@ export interface MinimalOctokit {
       createReview: (p: any) => Promise<unknown>;
       get: (p: any) => Promise<{ data: any }>;
     };
+    repos: {
+      get: (p: any) => Promise<{ data: any }>;
+    };
   };
 }

@@ -32213,6 +32213,19 @@ async function getPr(octokit, owner, repo, prNumber) {
         body: data.body ?? ''
     };
 }
+/** Fetch repository metadata (visibility, description, language, …). */
+async function getRepo(octokit, owner, repo) {
+    const { data } = await octokit.rest.repos.get({ owner, repo });
+    return {
+        fullName: data.full_name ?? `${owner}/${repo}`,
+        visibility: data.visibility ?? (data.private ? 'private' : 'public'),
+        description: data.description ?? '',
+        defaultBranch: data.default_branch ?? '',
+        language: data.language ?? null,
+        isFork: data.fork ?? false,
+        isArchived: data.archived ?? false
+    };
+}
 
 ;// CONCATENATED MODULE: ./src/diff.ts
 /**
@@ -32475,6 +32488,20 @@ function chunkFiles(files, maxChars) {
  * summary and review modes, each respecting a per-run patch-char budget.
  */
 const SUMMARY_MARKER = '<!-- ai-review:summary -->';
+/** One-line-per-fact repo context block included in every LLM user message. */
+function buildRepoContext(info) {
+    const lines = [
+        'Repository context:',
+        `- repo: ${info.fullName}`,
+        `- visibility: ${info.visibility}`,
+        info.description ? `- description: ${info.description}` : null,
+        `- default branch: ${info.defaultBranch || '(unknown)'}`,
+        `- primary language: ${info.language ?? '(unknown)'}`,
+        `- fork: ${info.isFork ? 'yes' : 'no'}`,
+        `- archived: ${info.isArchived ? 'yes' : 'no'}`
+    ];
+    return lines.filter((l) => l !== null).join('\n');
+}
 const SUMMARY_SYSTEM = `You are a senior software engineer writing a concise, insightful summary of a pull request for the reviewers.
 Focus on: what the PR does, the most important changes grouped by area, risk level with justification, and testing gaps.
 Do not restate every file. No fluff. Output STRICT JSON only, with exactly this shape:
@@ -32513,8 +32540,10 @@ function buildFileSection(files, maxChars) {
     return header + parts.join('');
 }
 /** Messages for the one-time PR summary. */
-function buildSummaryMessages(pr, files, maxPatchChars) {
+function buildSummaryMessages(pr, files, maxPatchChars, repo) {
     const user = [
+        buildRepoContext(repo),
+        '',
         `PR title: ${pr.title}`,
         `PR description:\n${pr.body || '(none)'}`,
         '',
@@ -32526,8 +32555,8 @@ function buildSummaryMessages(pr, files, maxPatchChars) {
     ];
 }
 /** Messages for an inline review run. */
-function buildReviewMessages(files, maxPatchChars) {
-    const user = buildFileSection(files, maxPatchChars);
+function buildReviewMessages(files, maxPatchChars, repo) {
+    const user = [buildRepoContext(repo), '', buildFileSection(files, maxPatchChars)].join('\n');
     return [
         { role: 'system', content: REVIEW_SYSTEM },
         { role: 'user', content: user }
@@ -32634,7 +32663,7 @@ function severityCounts(findings) {
  * Review the PR diff via the LLM and post one PR review with validated inline
  * comments. Chunks are processed sequentially to respect provider rate limits.
  */
-async function runReview(cfg, ctx, prInfo, deps) {
+async function runReview(cfg, ctx, prInfo, repoInfo, deps) {
     const log = deps.log ?? ((msg) => console.log(msg));
     if (prInfo.isDraft && !cfg.reviewDrafts) {
         log(`review: skipping draft PR #${ctx.prNumber}`);
@@ -32659,7 +32688,7 @@ async function runReview(cfg, ctx, prInfo, deps) {
     const chunks = chunkFiles(kept, cfg.maxPatchChars);
     const rawFindings = [];
     for (const chunk of chunks) {
-        const messages = buildReviewMessages(chunk, cfg.maxPatchChars);
+        const messages = buildReviewMessages(chunk, cfg.maxPatchChars, repoInfo);
         const result = (await deps.llm(messages));
         if (Array.isArray(result?.findings)) {
             rawFindings.push(...result.findings);
@@ -32746,7 +32775,7 @@ async function postComment(octokit, owner, repo, prNumber, body) {
  * skipped unless `review_drafts` is set; re-runs are no-ops once a comment
  * carrying the marker exists.
  */
-async function runSummary(cfg, ctx, prInfo, deps) {
+async function runSummary(cfg, ctx, prInfo, repoInfo, deps) {
     const log = deps.log ?? ((msg) => console.log(msg));
     if (prInfo.isDraft && !cfg.reviewDrafts) {
         log(`summary: skipping draft PR #${ctx.prNumber}`);
@@ -32764,7 +32793,7 @@ async function runSummary(cfg, ctx, prInfo, deps) {
         maxFiles: cfg.maxFiles,
         maxPatchChars: cfg.maxPatchChars
     });
-    const messages = buildSummaryMessages({ title: prInfo.title, body: prInfo.body }, kept, cfg.maxPatchChars);
+    const messages = buildSummaryMessages({ title: prInfo.title, body: prInfo.body }, kept, cfg.maxPatchChars, repoInfo);
     const result = await deps.llm(messages);
     const summaryMd = result?.summary_md;
     if (typeof summaryMd !== 'string' || summaryMd.length === 0) {
@@ -32826,6 +32855,7 @@ async function main() {
         return;
     }
     const prInfo = await getPr(octokit, ctx.owner, ctx.repo, ctx.prNumber);
+    const repoInfo = await getRepo(octokit, ctx.owner, ctx.repo);
     const llmCfg = {
         provider: cfg.provider,
         baseUrl: cfg.baseUrl,
@@ -32842,12 +32872,12 @@ async function main() {
     let reviewCommentCount = 0;
     let filesReviewed = 0;
     if (cfg.mode === 'summary' || cfg.mode === 'both') {
-        const result = await runSummary(cfg, ctx, prInfo, { octokit, llm });
+        const result = await runSummary(cfg, ctx, prInfo, repoInfo, { octokit, llm });
         summaryPosted = result.posted;
         filesReviewed = result.filesReviewed;
     }
     if (cfg.mode === 'review' || cfg.mode === 'both') {
-        const result = await runReview(cfg, ctx, prInfo, { octokit, llm });
+        const result = await runReview(cfg, ctx, prInfo, repoInfo, { octokit, llm });
         reviewCommentCount = result.commentCount;
         filesReviewed = result.filesReviewed;
     }

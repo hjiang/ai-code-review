@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { getPr, postReview } from '../../src/github/reviews.js';
+import { getPr, getRepo, postReview } from '../../src/github/reviews.js';
 import type { InlineComment, MinimalOctokit } from '../../src/github/types.js';
 
 const okComment = (path: string, line: number, body = 'good'): InlineComment => ({
@@ -157,5 +157,52 @@ describe('getPr', () => {
       rest: { issues: {}, pulls: { get, createReview: vi.fn(), listFiles: vi.fn() } }
     } as unknown as MinimalOctokit;
     expect((await getPr(octo, 'o', 'r', 7)).body).toBe('');
+  });
+});
+
+describe('getRepo', () => {
+  it('maps the repos.get response onto RepoInfo', async () => {
+    const get = vi.fn(async () => ({
+      data: {
+        full_name: 'o/r',
+        visibility: 'private',
+        description: 'desc',
+        default_branch: 'main',
+        language: 'Go',
+        fork: false,
+        archived: false
+      }
+    }));
+    const octo = {
+      rest: { issues: {}, pulls: {}, repos: { get } }
+    } as unknown as MinimalOctokit;
+    const info = await getRepo(octo, 'o', 'r');
+    expect(info).toEqual({
+      fullName: 'o/r',
+      visibility: 'private',
+      description: 'desc',
+      defaultBranch: 'main',
+      language: 'Go',
+      isFork: false,
+      isArchived: false
+    });
+    expect(get).toHaveBeenCalledWith({ owner: 'o', repo: 'r' });
+  });
+
+  it('falls back to owner/repo and private flag when fields are missing', async () => {
+    const get = vi.fn(async () => ({
+      data: { private: true }
+    }));
+    const octo = {
+      rest: { issues: {}, pulls: {}, repos: { get } }
+    } as unknown as MinimalOctokit;
+    const info = await getRepo(octo, 'owner-x', 'repo-y');
+    expect(info.visibility).toBe('private');
+    expect(info.fullName).toBe('owner-x/repo-y');
+    expect(info.description).toBe('');
+    expect(info.defaultBranch).toBe('');
+    expect(info.language).toBeNull();
+    expect(info.isFork).toBe(false);
+    expect(info.isArchived).toBe(false);
   });
 });

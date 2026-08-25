@@ -236,6 +236,7 @@ runReview(ctx, llm, gh):
   lines, else drop; unknown severity → 'suggestion').
 - Dedup identical `(path, line)` findings, keep highest severity.
 - Cap total comments at 30 per run (config not needed; hard cap).
+- Merge near-duplicate findings (same path, line within 3) keeping the highest severity - LLMs anchor the same issue at jittered lines across runs.
 
 **Tests**: everything in validateFindings (path repair, line snap, drop,
 dedup, cap), empty-files path, chunk-merge, body format, review posted with

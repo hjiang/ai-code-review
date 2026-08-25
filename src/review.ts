@@ -47,6 +47,13 @@ export interface ReviewResult {
 const SEVERITIES: Severity[] = ['critical', 'warning', 'suggestion'];
 const MAX_COMMENTS = 30;
 const LINE_SNAP_TOLERANCE = 3;
+/**
+ * Findings on the same path within this many lines are treated as one issue.
+ * LLMs anchor the same conceptual issue at slightly different lines across
+ * runs (observed ±2 lines with deepseek-v4-flash), so exact-line dedup lets
+ * near-duplicate comments through.
+ */
+const DEDUP_LINE_TOLERANCE = 3;
 
 const severityRank: Record<Severity, number> = { critical: 2, warning: 1, suggestion: 0 };
 
@@ -69,8 +76,9 @@ function nearestAnchor(anchors: Set<number>, line: number, tolerance: number): n
 
 /**
  * Validate LLM findings against the actual diff. Invalid entries are logged and
- * dropped; valid ones are deduped by (path, line) keeping the highest severity
- * and capped at MAX_COMMENTS. Never returns an anchor GitHub would reject.
+ * dropped; valid ones are deduped by (path, line ± DEDUP_LINE_TOLERANCE)
+ * keeping the highest severity (first-seen wins ties) and capped at
+ * MAX_COMMENTS. Never returns an anchor GitHub would reject.
  */
 export function validateFindings(
   findings: RawFinding[],
@@ -78,7 +86,7 @@ export function validateFindings(
   log: (msg: string) => void
 ): ValidFinding[] {
   const anchorsByPath = new Map<string, Set<number>>();
-  const byKey = new Map<string, ValidFinding>();
+  const accepted: ValidFinding[] = [];
   const skipped: string[] = [];
 
   for (const raw of findings) {
@@ -115,17 +123,24 @@ export function validateFindings(
       comment_md: comment,
       suggestion_md: raw.suggestion_md?.trim() || null
     };
-    const key = `${finding.path}:${finding.line}`;
-    const existing = byKey.get(key);
-    if (!existing || severityRank[finding.severity] > severityRank[existing.severity]) {
-      byKey.set(key, finding);
+    const near = accepted.find(
+      (a) => a.path === finding.path && Math.abs(a.line - finding.line) <= DEDUP_LINE_TOLERANCE
+    );
+    if (near) {
+      if (severityRank[finding.severity] > severityRank[near.severity]) {
+        // Same issue reported again with higher severity: supersede in place
+        // (keeps cluster position; the higher-severity report wins wholesale).
+        Object.assign(near, finding);
+      }
+      continue; // equal/lower severity near-duplicate: silently dropped
     }
+    accepted.push(finding);
   }
 
   for (const s of skipped) log(`review: dropped finding - ${s}`);
   // Prefer higher severity when capping; Array#sort is stable, so equal
   // severities keep their original (deterministic) insertion order.
-  return [...byKey.values()]
+  return accepted
     .sort((a, b) => severityRank[b.severity] - severityRank[a.severity])
     .slice(0, MAX_COMMENTS);
 }

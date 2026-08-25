@@ -114,12 +114,16 @@ appear as separate reviews - the natural "multiple times per PR" behavior.
   - Post: total content ≤ `max_patch_chars`; includes file stats, patches, and
     the repository context block (visibility, description, default branch,
     primary language, fork/archived flags) fetched via `GET /repos/{o}/{r}`.
-- `callLLM(config, messages, schemaHint)` -> `unknown` (parsed JSON)
-  - Retries 429/5xx (backoff 2s/8s/32s); on non-JSON response, re-asks once
-    with the parse error appended; throws `LLMError` after 2 parse failures.
+- `callLLM(config, messages)` -> `unknown` (parsed JSON)
+  - Retries 429/5xx (backoff 2s/8s/32s). An empty completion (reasoning-model
+    budget burn) retries once without `response_format`, then falls through to
+    the re-ask path; on non-JSON response, re-asks once with a JSON nudge
+    appended; throws `LLMError` after 2 parse failures.
 - `validateFindings(findings, prFiles)` -> `ValidFinding[]`
   - Post: every returned finding has `path ∈ diff`, `line ∈ newLines(path)`,
     severity ∈ enum, non-empty comment. Invalid ones are logged and dropped.
+    Near-duplicates (same path, line within 3) are merged keeping the highest
+    severity (first-seen wins ties).
 - `postReview(octokit, pr, commitId, findings)` -> review id
   - Posts body + inline comments in one API call.
 - `findMarkerComment(octokit, owner, repo, prNumber, marker)` -> comment | null

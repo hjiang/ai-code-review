@@ -80,15 +80,18 @@ describe('validateFindings', () => {
   });
 
   it('repairs ./-prefixed and case-mismatched paths', () => {
+    // Two distinct files: same-file findings within the near-duplicate
+    // tolerance would merge, which is not what this test is about.
+    const two = [file('src/a.ts'), file('src/b.ts')];
     const out = validateFindings(
       [
         { path: './src/a.ts', line: 2, severity: 'warning', comment_md: 'x' },
-        { path: 'SRC/A.TS', line: 1, severity: 'warning', comment_md: 'y' }
+        { path: 'SRC/B.TS', line: 1, severity: 'warning', comment_md: 'y' }
       ],
-      prFiles,
+      two,
       noop
     );
-    expect(out.map((f) => f.path)).toEqual(['src/a.ts', 'src/a.ts']);
+    expect(out.map((f) => f.path)).toEqual(['src/a.ts', 'src/b.ts']);
   });
 
   it('snaps an off-by-a-bit line to the nearest valid anchor', () => {
@@ -140,12 +143,58 @@ describe('validateFindings', () => {
     expect(out[0].severity).toBe('critical');
   });
 
+  it('merges near-duplicate findings on the same path within the dedup tolerance', () => {
+    const patch = `@@ -1,12 +1,12 @@\n${Array.from({ length: 12 }, (_, i) => `+line${i}`).join('\n')}\n`;
+    const wide = [file('src/wide.ts', patch)];
+    const out = validateFindings(
+      [
+        { path: 'src/wide.ts', line: 3, severity: 'warning', comment_md: 'A' },
+        { path: 'src/wide.ts', line: 5, severity: 'critical', comment_md: 'B' }
+      ],
+      wide,
+      noop
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ line: 5, severity: 'critical', comment_md: 'B' });
+  });
+
+  it('keeps the first-seen finding when a near-duplicate has equal severity', () => {
+    const patch = `@@ -1,12 +1,12 @@\n${Array.from({ length: 12 }, (_, i) => `+line${i}`).join('\n')}\n`;
+    const wide = [file('src/wide.ts', patch)];
+    const out = validateFindings(
+      [
+        { path: 'src/wide.ts', line: 3, severity: 'warning', comment_md: 'first' },
+        { path: 'src/wide.ts', line: 4, severity: 'warning', comment_md: 'second' }
+      ],
+      wide,
+      noop
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].comment_md).toBe('first');
+  });
+
+  it('keeps same-path findings further apart than the dedup tolerance', () => {
+    const patch = `@@ -1,12 +1,12 @@\n${Array.from({ length: 12 }, (_, i) => `+line${i}`).join('\n')}\n`;
+    const wide = [file('src/wide.ts', patch)];
+    const out = validateFindings(
+      [
+        { path: 'src/wide.ts', line: 2, severity: 'warning', comment_md: 'A' },
+        { path: 'src/wide.ts', line: 8, severity: 'warning', comment_md: 'B' }
+      ],
+      wide,
+      noop
+    );
+    expect(out).toHaveLength(2);
+  });
+
   it('caps the total number of comments at 30', () => {
-    const patch40 = `@@ -1,40 +1,40 @@\n${Array.from({ length: 40 }, (_, i) => `+line${i}`).join('\n')}\n`;
-    const wide = [file('src/a.ts', patch40)];
+    // Lines 4 apart so every finding is a distinct issue under the
+    // near-duplicate tolerance (same path within 3 lines merges).
+    const patch160 = `@@ -1,160 +1,160 @@\n${Array.from({ length: 160 }, (_, i) => `+line${i}`).join('\n')}\n`;
+    const wide = [file('src/a.ts', patch160)];
     const many = Array.from({ length: 40 }, (_, i) => ({
       path: 'src/a.ts',
-      line: i + 1,
+      line: 4 * i + 1,
       severity: 'warning',
       comment_md: `issue ${i}`
     }));
@@ -154,16 +203,18 @@ describe('validateFindings', () => {
   });
 
   it('caps at 30 findings preferring higher severity (deterministic tie-break)', () => {
-    const patch40 = `@@ -1,40 +1,40 @@\n${Array.from({ length: 40 }, (_, i) => `+line${i}`).join('\n')}\n`;
-    const wide = [file('src/wide.ts', patch40)];
+    // Lines 4 apart so every finding is a distinct issue under the
+    // near-duplicate tolerance (same path within 3 lines merges).
+    const patch160 = `@@ -1,160 +1,160 @@\n${Array.from({ length: 160 }, (_, i) => `+line${i}`).join('\n')}\n`;
+    const wide = [file('src/wide.ts', patch160)];
     const many: RawFinding[] = [];
     // 32 suggestions arrive first...
-    for (let i = 1; i <= 32; i++) {
-      many.push({ path: 'src/wide.ts', line: i, severity: 'suggestion', comment_md: `s${i}` });
+    for (let i = 0; i < 32; i++) {
+      many.push({ path: 'src/wide.ts', line: 4 * i + 1, severity: 'suggestion', comment_md: `s${i}` });
     }
     // ...and the criticals arrive last: they must survive the cap.
-    many.push({ path: 'src/wide.ts', line: 33, severity: 'critical', comment_md: 'c33' });
-    many.push({ path: 'src/wide.ts', line: 34, severity: 'critical', comment_md: 'c34' });
+    many.push({ path: 'src/wide.ts', line: 129, severity: 'critical', comment_md: 'c129' });
+    many.push({ path: 'src/wide.ts', line: 133, severity: 'critical', comment_md: 'c133' });
     const out = validateFindings(many, wide, noop);
     expect(out).toHaveLength(30);
     expect(out.filter((f) => f.severity === 'critical')).toHaveLength(2);

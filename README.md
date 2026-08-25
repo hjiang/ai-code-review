@@ -152,7 +152,7 @@ Anthropic adapter; everything else uses the OpenAI adapter. Override with the
 | `max_tokens` | no | `8192` | Completion budget |
 | `temperature` | no | `0.2` | |
 | `response_format` | no | `auto` | `auto` \| `off`. `auto` sends `response_format: json_object` and auto-retries without it on an empty/rejected completion; `off` never sends it. **Set `off` for reasoning models** (e.g. `deepseek-v4-flash`): with `json_object` they can burn the whole token budget on reasoning and return empty content.
-| `extra_body` | no | — | Optional JSON object merged into the LLM request body (user keys win). For reasoning models that support it, disable thinking entirely: `{"thinking":{"type":"disabled"}}` (or reduce it: `{"reasoning_effort":"low"}`). Retried once without it if the provider rejects it with 400. |
+| `extra_body` | no | - | Optional JSON object merged into the LLM request body (user keys win). For reasoning models that support it, disable thinking entirely: `{"thinking":{"type":"disabled"}}` (do **not** use `reasoning_effort: "low"` - see Notes). Retried once without it if the provider rejects it with 400. |
 | `exclude` | no | built-ins | Extra glob excludes (comma/newline separated) |
 | `max_files` | no | `40` | Files per review run |
 | `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file patch cap) |
@@ -190,20 +190,27 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
 
 ## Notes & limitations
 
-- **Reasoning models**: some providers expose reasoning models (e.g.
-  `deepseek-v4-flash`) that return `content: ""` with `finish_reason: length`
-  when `response_format: json_object` is sent — they spend the whole token
-  budget "thinking" and never emit content. Set `response_format: off` in your
-  workflow for these models (the strict-JSON prompt + re-ask still enforce JSON
-  output). With the default `auto`, the action detects the empty completion and
-  retries the same prompt without `response_format` before re-asking.
-- **Thinking budget**: a reasoning model can also burn its budget on
-  `reasoning_content` alone (no `response_format` involved), especially on
-  large diffs, returning empty content. If your provider supports it, disable
-  thinking for reviews via `extra_body`:
-  `extra_body: '{"thinking":{"type":"disabled"}}'` (DeepSeek-style) or
-  `extra_body: '{"reasoning_effort":"low"}'` (OpenAI-style) — measured ~3s vs
-  ~60s per call on DeepSeek and eliminates the empty-content failure.
+- **Reasoning models** (e.g. `deepseek-v4-flash`): they can spend their
+  whole token budget on `reasoning_content` and return `content: ""` with
+  `finish_reason: length` - i.e. no review at all. Two failure modes, both
+  measured against the DeepSeek API on a ~14k-char diff (5 trials per config):
+  - **`response_format: json_object` makes it worse** - set
+    `response_format: off`. (With the default `auto`, the action detects the
+    empty completion and retries the same prompt without `response_format`
+    before re-asking.)
+  - **Raising `max_tokens` is a threshold, not a dial.** Reasoning consumed
+    100% of both an 8k and a 16k budget (every trial empty); 32k barely
+    cleared it (~2/3 usable, ~16× slower, ~17× tokens, *and fewer findings*
+    than thinking disabled - median 3 vs 8). Reasoning appetite scales with
+    diff size, so larger diffs silently break again at any fixed budget.
+  - **Recommended**: `response_format: off` +
+    `extra_body: '{"thinking":{"type":"disabled"}}'` - measured ~10s per
+    call (vs 60-165s), valid JSON on every trial, and more findings.
+  - **`reasoning_effort: "low"` is not recommended**: it reported the fewest
+    findings of any config (median 2, one trial zero) - reduced reasoning
+    makes the model hedge ("can't be sure without more context") and suppress
+    real issues. Worst of both worlds: slower than thinking disabled, far
+    fewer findings than either.
 - **Repo context**: the LLM prompt includes repository metadata fetched from
   the GitHub API — `owner/repo`, **visibility (public/private)**, description,
   default branch, primary language, and fork/archived flags — so the model can

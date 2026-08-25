@@ -228,9 +228,7 @@ export async function runReview(
     return { commentCount: 0, filesReviewed: 0 };
   }
 
-  const previous = cfg.skipPreviousComments
-    ? await fetchPreviousComments(deps.octokit, ctx.owner, ctx.repo, ctx.prNumber)
-    : [];
+  const previous = await fetchPreviousComments(deps.octokit, ctx.owner, ctx.repo, ctx.prNumber);
   if (previous.length > 0) {
     log(`review: ${previous.length} previously reported comment(s) to avoid repeating`);
   }

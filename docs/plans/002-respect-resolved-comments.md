@@ -66,17 +66,15 @@ the PR's earlier threads.
 - `normalizeTokens(text): Set<string>` and `jaccard(a, b): number` helpers
   (strip emoji/markdown/severity headers, lowercase, drop stopwords/1-char).
 
-### 6. Config toggle
+### Config
 
-- New input `skip_previous_comments` (`true` default) → `ActionConfig`.
-  When `false`, behavior is unchanged (current behavior).
-- Wired through `action.yml`, `context.ts`, `review.ts`.
+- Behavior is always-on: every review run avoids repeating previously
+  reported comments. No input toggles it.
 
 ## Files touched
 
 - `src/github/threads.ts` (new), `src/github/types.ts`
 - `src/review.ts`, `src/prompt.ts`, `src/util/text.ts`
-- `src/context.ts`, `action.yml`
 - Tests: `test/github/threads.test.ts` (new), `test/review.test.ts`,
   `test/prompt.test.ts`, `test/util/text.test.ts` (new)
 - Docs: `README.md`, `docs/REQUIREMENTS.md`, `docs/ARCHITECTURE.md`
@@ -90,8 +88,7 @@ the PR's earlier threads.
    rephrased same issue dropped; identical text different path kept;
    different issue kept; below-threshold kept; drop logged.
 3. `runReview`: previous comments passed into the LLM prompt; repeat finding
-   not posted (createReview gets only new comments); `skip_previous_comments:
-   false` disables suppression.
+   not posted (createReview gets only new comments).
 4. `prompt.test.ts`: resolved block present/absent; capped.
 5. `util/text.test.ts`: normalization + jaccard helpers.
 
@@ -101,7 +98,7 @@ the PR's earlier threads.
   wording) is never posted.
 - Genuinely new findings — including the same bug pattern in a *different*
   file — are still posted.
-- No behavior change with `skip_previous_comments: false` or when there are no
+- No behavior change when there are no
   previous threads.
 - `npm run typecheck`, `npm test`, `npm run coverage` (thresholds held),
   `npm run build` (dist rebuilt & committed) all pass.

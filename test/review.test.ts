@@ -22,8 +22,7 @@ const cfg: ActionConfig = {
   maxPatchChars: 5000,
   reviewDrafts: false,
   commentTrigger: '/review',
-  failOnError: false,
-  skipPreviousComments: true
+  failOnError: false
 };
 const ctx: PrContext = { owner: 'o', repo: 'r', prNumber: 7, botLogin: 'bot' };
 const prInfo: PrInfo = { commitId: 'sha', isDraft: false, title: 'T', body: '' };
@@ -457,18 +456,5 @@ describe('runReview', () => {
     expect(user).toContain('Previously reported');
     expect(user).toContain('src/a.ts:2');
     expect(user).toContain('Missing null check');
-  });
-
-  it('skips previous-comment suppression when skip_previous_comments is false', async () => {
-    const octo = makeOctokit([file('src/a.ts')]);
-    const llm = vi.fn(async () => ({
-      findings: [
-        { path: 'src/a.ts', line: 2, severity: 'warning', comment_md: '🔴 SQL built by string concatenation is injectable.' }
-      ]
-    }));
-    const noSkip = { ...cfg, skipPreviousComments: false };
-    const res = await runReview(noSkip, ctx, prInfo, repoInfo, { octokit: octo, llm });
-    expect(octo.rest.pulls.listReviewComments).not.toHaveBeenCalled();
-    expect(res.commentCount).toBe(1);
   });
 });

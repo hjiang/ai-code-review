@@ -162,7 +162,6 @@ Anthropic adapter; everything else uses the OpenAI adapter. Override with the
 | `comment_trigger` | no | `/review` | Issue-comment trigger text |
 | `pr_number` | no | — | Required for `workflow_dispatch` |
 | `fail_on_error` | no | `false` | Fail the workflow if the action errors |
-| `skip_previous_comments` | no | `true` | Don't re-report issues already discussed in existing inline review threads (resolved or not). Prior thread comments are listed for the LLM, and findings whose wording overlaps a prior comment on the same file are dropped. Set `false` to review as if the PR were fresh.
 
 Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
 `yarn.lock`, `pnpm-lock.yaml`, `go.sum`, `Cargo.lock`, `poetry.lock`),

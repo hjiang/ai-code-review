@@ -32254,8 +32254,7 @@ function loadConfig(reader) {
         maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
         reviewDrafts: toBool(reader.getInput('review_drafts')),
         commentTrigger: reader.getInput('comment_trigger') || '/review',
-        failOnError: toBool(reader.getInput('fail_on_error')),
-        skipPreviousComments: toBool(reader.getInput('skip_previous_comments') || 'true')
+        failOnError: toBool(reader.getInput('fail_on_error'))
     };
 }
 /**
@@ -33006,9 +33005,7 @@ async function runReview(cfg, ctx, prInfo, repoInfo, deps) {
         });
         return { commentCount: 0, filesReviewed: 0 };
     }
-    const previous = cfg.skipPreviousComments
-        ? await fetchPreviousComments(deps.octokit, ctx.owner, ctx.repo, ctx.prNumber)
-        : [];
+    const previous = await fetchPreviousComments(deps.octokit, ctx.owner, ctx.repo, ctx.prNumber);
     if (previous.length > 0) {
         log(`review: ${previous.length} previously reported comment(s) to avoid repeating`);
     }

@@ -21,8 +21,7 @@ const cfg: ActionConfig = {
   maxPatchChars: 5000,
   reviewDrafts: false,
   commentTrigger: '/review',
-  failOnError: false,
-  skipPreviousComments: true
+  failOnError: false
 };
 
 const ctx: PrContext = { owner: 'o', repo: 'r', prNumber: 7, botLogin: 'bot' };

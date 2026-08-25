@@ -119,6 +119,14 @@ export function loadConfig(reader: InputReader): ActionConfig {
     } catch {
       throw new Error(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
     }
+  } else if (/api\.deepseek\.com/i.test(baseUrl)) {
+    // DeepSeek's API defaults thinking to ENABLED (documented at
+    // https://api-docs.deepseek.com) and its v4 reasoning models spend their
+    // whole token budget on reasoning_content for review-sized prompts,
+    // returning empty content (measured: 100% of 8k/16k budgets). Opt DeepSeek
+    // reviews out of thinking mode unless the user configures extra_body
+    // themselves (an explicit extra_body always wins).
+    extraBody = { thinking: { type: 'disabled' } };
   }
 
   return {

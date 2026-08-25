@@ -78,8 +78,12 @@ async function main(): Promise<void> {
   };
   const endpoint =
     cfg.provider === 'anthropic' ? buildAnthropicUrl(cfg.baseUrl) : buildOpenAiUrl(cfg.baseUrl);
+  const extraBodyLog =
+    cfg.extraBody && Object.keys(cfg.extraBody).length > 0
+      ? ` extra_body=${JSON.stringify(cfg.extraBody)}`
+      : '';
   core.info(
-    `ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint}`
+    `ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint}${extraBodyLog}`
   );
   const llm = (messages: LLMMessage[]) => callLLM(llmCfg, messages);
 

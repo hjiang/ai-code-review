@@ -32180,6 +32180,15 @@ function loadConfig(reader) {
             throw new Error(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
         }
     }
+    else if (/api\.deepseek\.com/i.test(baseUrl)) {
+        // DeepSeek's API defaults thinking to ENABLED (documented at
+        // https://api-docs.deepseek.com) and its v4 reasoning models spend their
+        // whole token budget on reasoning_content for review-sized prompts,
+        // returning empty content (measured: 100% of 8k/16k budgets). Opt DeepSeek
+        // reviews out of thinking mode unless the user configures extra_body
+        // themselves (an explicit extra_body always wins).
+        extraBody = { thinking: { type: 'disabled' } };
+    }
     return {
         mode: modeInput,
         githubToken: reader.getInput('github_token'),
@@ -32980,7 +32989,10 @@ async function main() {
         log: (msg) => core.info(`ai-code-review: ${msg}`)
     };
     const endpoint = cfg.provider === 'anthropic' ? buildAnthropicUrl(cfg.baseUrl) : buildOpenAiUrl(cfg.baseUrl);
-    core.info(`ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint}`);
+    const extraBodyLog = cfg.extraBody && Object.keys(cfg.extraBody).length > 0
+        ? ` extra_body=${JSON.stringify(cfg.extraBody)}`
+        : '';
+    core.info(`ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint}${extraBodyLog}`);
     const llm = (messages) => callLLM(llmCfg, messages);
     let summaryPosted = false;
     let reviewCommentCount = 0;

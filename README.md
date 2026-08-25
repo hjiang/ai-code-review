@@ -129,7 +129,7 @@ also use **Run workflow** (workflow_dispatch) and give it a PR number.
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
 | Anthropic | `https://api.anthropic.com` | `claude-sonnet-4-5` |
 | OpenRouter | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4` |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-v4-flash` (thinking auto-disabled; see Notes) |
 | Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
 | Together | `https://api.together.xyz/v1` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
 | Ollama (local) | `http://localhost:11434/v1` | `qwen2.5-coder:14b` |
@@ -194,18 +194,27 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
   whole token budget on `reasoning_content` and return `content: ""` with
   `finish_reason: length` - i.e. no review at all. Two failure modes, both
   measured against the DeepSeek API on a ~14k-char diff (5 trials per config):
-  - **`response_format: json_object` makes it worse** - set
-    `response_format: off`. (With the default `auto`, the action detects the
-    empty completion and retries the same prompt without `response_format`
-    before re-asking.)
+  - **`response_format: json_object` amplifies the burn while thinking is
+    enabled** - but it is harmless once thinking is disabled, so the default
+    `auto` is fine. (The action also detects empty completions and retries
+    the same prompt without `response_format` before re-asking.)
   - **Raising `max_tokens` is a threshold, not a dial.** Reasoning consumed
     100% of both an 8k and a 16k budget (every trial empty); 32k barely
     cleared it (~2/3 usable, ~16× slower, ~17× tokens, *and fewer findings*
     than thinking disabled - median 3 vs 8). Reasoning appetite scales with
     diff size, so larger diffs silently break again at any fixed budget.
-  - **Recommended**: `response_format: off` +
-    `extra_body: '{"thinking":{"type":"disabled"}}'` - measured ~10s per
-    call (vs 60-165s), valid JSON on every trial, and more findings.
+  - **Recommended - and automatic for DeepSeek**: thinking should be disabled
+    for reviews. The action auto-applies `thinking: {"type": "disabled"}`
+    (via `extra_body`) whenever `api_base_url` points at `api.deepseek.com`
+    and you have not set `extra_body` yourself - DeepSeek's API defaults
+    thinking to **enabled** (documented at api-docs.deepseek.com), which is
+    what burned the budget. Measured with thinking disabled: ~10s per call
+    (vs 60-165s), valid JSON on every trial, more findings. `response_format`
+    can stay at its `auto` default - `json_object` works fine once thinking
+    is off.
+  - Other providers with reasoning models: set
+    `extra_body: '{"thinking":{"type":"disabled"}}'` (DeepSeek-style) or
+    `extra_body: '{"reasoning_effort":"low"}'` yourself.
   - **`reasoning_effort: "low"` is not recommended**: it reported the fewest
     findings of any config (median 2, one trial zero) - reduced reasoning
     makes the model hedge ("can't be sure without more context") and suppress

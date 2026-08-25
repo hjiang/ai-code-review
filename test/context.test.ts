@@ -83,6 +83,42 @@ describe('loadConfig', () => {
     expect(() => loadConfig(reader({ extra_body: '[1,2]' }))).toThrow(/extra_body/i);
   });
 
+  it('auto-disables thinking for DeepSeek base URLs when extra_body is unset', () => {
+    // DeepSeek's API defaults thinking to ENABLED (documented) and its v4
+    // reasoning models burn the whole token budget on reasoning_content for
+    // review-sized prompts -> empty content. So the action opts DeepSeek out
+    // unless the user configures extra_body themselves.
+    for (const base of ['https://api.deepseek.com', 'https://api.deepseek.com/v1']) {
+      expect(loadConfig(reader({ api_base_url: base })).extraBody).toEqual({
+        thinking: { type: 'disabled' }
+      });
+    }
+  });
+
+  it('an explicit extra_body always wins over the DeepSeek auto-default', () => {
+    expect(
+      loadConfig(
+        reader({ api_base_url: 'https://api.deepseek.com/v1', extra_body: '{"thinking":{"type":"enabled"}}' })
+      ).extraBody
+    ).toEqual({ thinking: { type: 'enabled' } });
+    expect(
+      loadConfig(
+        reader({ api_base_url: 'https://api.deepseek.com/v1', extra_body: '{"reasoning_effort":"low"}' })
+      ).extraBody
+    ).toEqual({ reasoning_effort: 'low' });
+    // An explicitly empty object is still a user override: no auto-default.
+    expect(
+      loadConfig(reader({ api_base_url: 'https://api.deepseek.com/v1', extra_body: '{}' })).extraBody
+    ).toEqual({});
+  });
+
+  it('leaves extra_body empty for non-DeepSeek providers', () => {
+    expect(loadConfig(reader()).extraBody).toEqual({});
+    expect(
+      loadConfig(reader({ api_base_url: 'https://api.openai.com/v1' })).extraBody
+    ).toEqual({});
+  });
+
   it('resolves the provider from an explicit input or auto', () => {
     expect(loadConfig(reader({ provider: 'anthropic' })).provider).toBe('anthropic');
     expect(

@@ -21,7 +21,8 @@ const cfg: ActionConfig = {
   maxPatchChars: 5000,
   reviewDrafts: false,
   commentTrigger: '/review',
-  failOnError: false
+  failOnError: false,
+  skipPreviousComments: true
 };
 
 const ctx: PrContext = { owner: 'o', repo: 'r', prNumber: 7, botLogin: 'bot' };
@@ -60,7 +61,8 @@ function makeOctokit(over: Partial<MinimalOctokit['rest']> = {}): MinimalOctokit
       pulls: {
         listFiles: vi.fn(async () => ({ data: [apiFile('a.ts')] })),
         createReview: vi.fn(async () => ({})),
-        get: vi.fn()
+        get: vi.fn(),
+        listReviewComments: vi.fn(async () => ({ data: [] }))
       },
       repos: {
         get: vi.fn(async () => ({ data: {} }))
@@ -131,7 +133,8 @@ describe('runSummary', () => {
       pulls: {
         listFiles: vi.fn(async () => ({ data: [apiFileWithPatch('src/big.ts', bigPatch)] })),
         createReview: vi.fn(async () => ({})),
-        get: vi.fn()
+        get: vi.fn(),
+        listReviewComments: vi.fn(async () => ({ data: [] }))
       }
     });
     const llm = vi.fn(async () => ({ summary_md: 'ok' }));

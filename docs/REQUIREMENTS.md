@@ -48,6 +48,12 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
   a size cap. Respects `.gitignore`-style exclude patterns from input.
 - FR-R6: Diff size cap: if the total diff exceeds a token budget, chunk the
   review across multiple LLM calls and merge findings.
+- FR-R7: Never repeat an issue already reported in an existing inline review
+  thread on the PR (resolved or not, any author). Prior thread root comments
+  are fed into the LLM prompt (semantic layer) and, as a deterministic safety
+  net, a finding is dropped when its normalized text overlaps a prior comment
+  on the same path (token containment ≥ 0.5 with ≥ 4 shared tokens). Controlled
+  by `skip_previous_comments` (default `true`).
 
 ### Provider client
 - FR-P1: OpenAI-compatible: `POST {base_url}/chat/completions`, Bearer auth.
@@ -78,6 +84,7 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
 | `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file cap) |
 | `review_drafts` | no | `false` | Review draft PRs |
 | `fail_on_error` | no | `false` | Fail the workflow if the action errors |
+| `skip_previous_comments` | no | `true` | Avoid re-reporting issues already in existing review threads |
 
 ## Outputs
 

@@ -7,6 +7,9 @@ import { fetchPrFiles, validAnchors } from './diff.js';
 import { chunkFiles, filterFiles } from './filter.js';
 import { buildReviewMessages } from './prompt.js';
 import { postReview } from './github/reviews.js';
+import { fetchPreviousComments } from './github/threads.js';
+import type { PreviousComment } from './github/threads.js';
+import { normalizeTokens, tokenContainment } from './util/text.js';
 import type { ActionConfig, PrContext } from './context.js';
 import type { PrInfo, RepoInfo } from './github/reviews.js';
 import type { PrFile } from './diff.js';
@@ -54,6 +57,15 @@ const LINE_SNAP_TOLERANCE = 3;
  * near-duplicate comments through.
  */
 const DEDUP_LINE_TOLERANCE = 3;
+/**
+ * Repeat-detection guard against previously reported review comments. A
+ * finding repeats a previous comment when, on the SAME path, it shares at
+ * least REPEAT_MIN_OVERLAP normalized tokens AND the smaller token set is at
+ * least this fraction contained in the larger. Text-based (not positional) so
+ * repeats are caught even when line numbers shift between runs.
+ */
+const REPEAT_CONTAINMENT_THRESHOLD = 0.5;
+const REPEAT_MIN_OVERLAP = 4;
 
 const severityRank: Record<Severity, number> = { critical: 2, warning: 1, suggestion: 0 };
 
@@ -83,7 +95,8 @@ function nearestAnchor(anchors: Set<number>, line: number, tolerance: number): n
 export function validateFindings(
   findings: RawFinding[],
   prFiles: PrFile[],
-  log: (msg: string) => void
+  log: (msg: string) => void,
+  previous: PreviousComment[] = []
 ): ValidFinding[] {
   const anchorsByPath = new Map<string, Set<number>>();
   const accepted: ValidFinding[] = [];
@@ -134,6 +147,10 @@ export function validateFindings(
       }
       continue; // equal/lower severity near-duplicate: silently dropped
     }
+    if (previous.length > 0 && repeatsPrevious(finding, previous)) {
+      skipped.push(`${finding.path}:${finding.line} repeats previously reported comment`);
+      continue;
+    }
     accepted.push(finding);
   }
 
@@ -143,6 +160,29 @@ export function validateFindings(
   return accepted
     .sort((a, b) => severityRank[b.severity] - severityRank[a.severity])
     .slice(0, MAX_COMMENTS);
+}
+
+/**
+ * True when `finding` repeats a previously reported comment on the same path.
+ * Identical wording in a different file is a distinct instance and is kept.
+ */
+function repeatsPrevious(finding: ValidFinding, previous: PreviousComment[]): boolean {
+  const fTokens = normalizeTokens(finding.comment_md);
+  if (fTokens.size === 0) return false;
+  for (const c of previous) {
+    if (c.path !== finding.path) continue;
+    const pTokens = normalizeTokens(c.body);
+    if (pTokens.size === 0) continue;
+    let shared = 0;
+    for (const t of pTokens) if (fTokens.has(t)) shared++;
+    if (
+      shared >= REPEAT_MIN_OVERLAP &&
+      tokenContainment(fTokens, pTokens) >= REPEAT_CONTAINMENT_THRESHOLD
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function severityCounts(findings: ValidFinding[]): Record<Severity, number> {
@@ -188,10 +228,17 @@ export async function runReview(
     return { commentCount: 0, filesReviewed: 0 };
   }
 
+  const previous = cfg.skipPreviousComments
+    ? await fetchPreviousComments(deps.octokit, ctx.owner, ctx.repo, ctx.prNumber)
+    : [];
+  if (previous.length > 0) {
+    log(`review: ${previous.length} previously reported comment(s) to avoid repeating`);
+  }
+
   const chunks = chunkFiles(kept, cfg.maxPatchChars);
   const rawFindings: RawFinding[] = [];
   for (const chunk of chunks) {
-    const messages = buildReviewMessages(chunk, cfg.maxPatchChars, repoInfo);
+    const messages = buildReviewMessages(chunk, cfg.maxPatchChars, repoInfo, previous);
     const result = (await deps.llm(messages)) as { findings?: unknown };
     if (Array.isArray(result?.findings)) {
       rawFindings.push(...(result.findings as RawFinding[]));
@@ -200,7 +247,7 @@ export async function runReview(
     }
   }
 
-  const valid = validateFindings(rawFindings, kept, log);
+  const valid = validateFindings(rawFindings, kept, log, previous);
   const counts = severityCounts(valid);
   const body =
     `## 🤖 AI Review\n\n` +

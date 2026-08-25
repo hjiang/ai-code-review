@@ -150,4 +150,30 @@ describe('buildReviewMessages', () => {
     expect(user.content.length - diffIdx).toBeLessThanOrEqual(80 + 200);
     expect(user.content).toMatch(/truncated/i);
   });
+
+  it('omits the previously-reported block when there are no previous comments', () => {
+    const [, user] = buildReviewMessages(files, 100000, repo);
+    expect(user.content).not.toContain('Previously reported');
+  });
+
+  it('includes a compact block of previously reported comments', () => {
+    const previous = [
+      { path: 'src/auth.ts', line: 12, body: 'SQL built by string concatenation is injectable.' }
+    ];
+    const [, user] = buildReviewMessages(files, 100000, repo, previous);
+    expect(user.content).toContain('Previously reported');
+    expect(user.content).toContain('src/auth.ts:12');
+    expect(user.content).toContain('SQL built by string concatenation');
+  });
+
+  it('caps the previously-reported block at a bounded number of entries', () => {
+    const many = Array.from({ length: 200 }, (_, i) => ({
+      path: `src/f${i}.ts`,
+      line: 1,
+      body: `issue number ${i}`
+    }));
+    const [, user] = buildReviewMessages(files, 100000, repo, many);
+    const matches = user.content.match(/src\/f\d+\.ts:1/g) ?? [];
+    expect(matches.length).toBeLessThan(200);
+  });
 });

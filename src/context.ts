@@ -28,6 +28,7 @@ export interface ActionConfig {
   reviewDrafts: boolean;
   commentTrigger: string;
   failOnError: boolean;
+  skipPreviousComments: boolean;
 }
 
 export interface IssueCommentInfo {
@@ -145,7 +146,8 @@ export function loadConfig(reader: InputReader): ActionConfig {
     maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
     reviewDrafts: toBool(reader.getInput('review_drafts')),
     commentTrigger: reader.getInput('comment_trigger') || '/review',
-    failOnError: toBool(reader.getInput('fail_on_error'))
+    failOnError: toBool(reader.getInput('fail_on_error')),
+    skipPreviousComments: toBool(reader.getInput('skip_previous_comments') || 'true')
   };
 }
 

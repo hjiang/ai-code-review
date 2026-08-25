@@ -66,6 +66,10 @@ inputs:
     description: 'Fail the workflow if the action errors'
     default: 'false'
     required: false
+  skip_previous_comments:
+    description: 'Avoid re-reporting issues already discussed in existing inline review threads (resolved or not)'
+    default: 'true'
+    required: false
 outputs:
   summary_posted:
     description: '"true" if a summary comment was posted this run'

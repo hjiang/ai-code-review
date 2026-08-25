@@ -22,7 +22,8 @@ const cfg: ActionConfig = {
   maxPatchChars: 5000,
   reviewDrafts: false,
   commentTrigger: '/review',
-  failOnError: false
+  failOnError: false,
+  skipPreviousComments: true
 };
 const ctx: PrContext = { owner: 'o', repo: 'r', prNumber: 7, botLogin: 'bot' };
 const prInfo: PrInfo = { commitId: 'sha', isDraft: false, title: 'T', body: '' };
@@ -49,7 +50,8 @@ function makeOctokit(files: unknown[]): MinimalOctokit {
       pulls: {
         listFiles: vi.fn(async () => ({ data: files })),
         createReview: vi.fn(async () => ({ data: { id: 1 } })),
-        get: vi.fn()
+        get: vi.fn(),
+        listReviewComments: vi.fn(async () => ({ data: [] }))
       }
     }
   } as unknown as MinimalOctokit;
@@ -222,6 +224,125 @@ describe('validateFindings', () => {
   });
 });
 
+describe('validateFindings with previously reported comments', () => {
+  const prFiles = [file('src/a.ts')];
+  const noop = () => {};
+  const previous = [
+    {
+      path: 'src/a.ts',
+      line: 2,
+      body: '🔴 **Severity: critical**\n\nSQL built by string concatenation is injectable.\n\nUse parameterized queries.'
+    }
+  ];
+
+  it('drops a near-identical repeat on the same path', () => {
+    const out = validateFindings(
+      [
+        {
+          path: 'src/a.ts',
+          line: 2,
+          severity: 'warning',
+          comment_md:
+            '🟠 **Severity: warning**\n\nSQL built by string concatenation is injectable.\n\nUse a prepared statement instead.'
+        }
+      ],
+      prFiles,
+      noop,
+      previous
+    );
+    expect(out).toEqual([]);
+  });
+
+  it('drops a rephrased repeat on the same path', () => {
+    const out = validateFindings(
+      [
+        {
+          path: 'src/a.ts',
+          line: 2,
+          severity: 'warning',
+          comment_md:
+            '🟠 **Warning**\n\nString concatenation makes this SQL injectable.\n\nUse bind parameters.'
+        }
+      ],
+      prFiles,
+      noop,
+      previous
+    );
+    expect(out).toEqual([]);
+  });
+
+  it('keeps identical wording on a different path', () => {
+    const two = [file('src/a.ts'), file('src/b.ts')];
+    const out = validateFindings(
+      [
+        {
+          path: 'src/b.ts',
+          line: 2,
+          severity: 'critical',
+          comment_md: '🔴 SQL built by string concatenation is injectable.\n\nUse parameterized queries.'
+        }
+      ],
+      two,
+      noop,
+      previous
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].path).toBe('src/b.ts');
+  });
+
+  it('keeps a different issue on the same path', () => {
+    const out = validateFindings(
+      [
+        {
+          path: 'src/a.ts',
+          line: 2,
+          severity: 'warning',
+          comment_md: '🟠 Missing error handling around fetch; unhandled rejection crashes the process.'
+        }
+      ],
+      prFiles,
+      noop,
+      previous
+    );
+    expect(out).toHaveLength(1);
+  });
+
+  it('keeps a finding whose overlap is below the threshold', () => {
+    const out = validateFindings(
+      [
+        {
+          path: 'src/a.ts',
+          line: 2,
+          severity: 'warning',
+          comment_md: '🟠 Avoid exposing the token in the URL; use an Authorization header.'
+        }
+      ],
+      prFiles,
+      noop,
+      previous
+    );
+    expect(out).toHaveLength(1);
+  });
+
+  it('logs the drop', () => {
+    const logs: string[] = [];
+    validateFindings(
+      [
+        {
+          path: 'src/a.ts',
+          line: 2,
+          severity: 'critical',
+          comment_md: '🔴 SQL built by string concatenation is injectable. Use parameterized queries.'
+        }
+      ],
+      prFiles,
+      (m) => logs.push(m),
+      previous
+    );
+    expect(logs.some((l) => l.includes('previously reported'))).toBe(true);
+  });
+});
+
 describe('runReview', () => {
   it('skips draft PRs unless review_drafts is set', async () => {
     const octo = makeOctokit([file('src/a.ts')]);
@@ -302,5 +423,52 @@ describe('runReview', () => {
     const res = await runReview(bigCfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
     expect(llm).toHaveBeenCalled();
     expect(res.filesReviewed).toBe(1);
+  });
+
+  it('suppresses a finding that repeats a previously reported comment', async () => {
+    const octo = makeOctokit([file('src/a.ts')]);
+    (octo.rest.pulls.listReviewComments as ReturnType<typeof vi.fn>).mockResolvedValue({
+      data: [
+        { path: 'src/a.ts', line: 2, body: '🔴 SQL built by string concatenation is injectable. Use parameterized queries.', in_reply_to_id: null }
+      ]
+    });
+    const llm = vi.fn(async () => ({
+      findings: [
+        { path: 'src/a.ts', line: 2, severity: 'critical', comment_md: '🔴 SQL built by string concatenation is injectable. Use parameterized queries.' }
+      ]
+    }));
+    const res = await runReview(cfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
+    expect(res.commentCount).toBe(0);
+    const payload = (octo.rest.pulls.createReview as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.comments).toEqual([]);
+  });
+
+  it('feeds previously reported comments into the LLM prompt', async () => {
+    const octo = makeOctokit([file('src/a.ts')]);
+    (octo.rest.pulls.listReviewComments as ReturnType<typeof vi.fn>).mockResolvedValue({
+      data: [
+        { path: 'src/a.ts', line: 2, body: 'Missing null check', in_reply_to_id: null }
+      ]
+    });
+    const llm = vi.fn(async () => ({ findings: [] }));
+    await runReview(cfg, ctx, prInfo, repoInfo, { octokit: octo, llm });
+    const messages = (llm as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const user = messages[1].content as string;
+    expect(user).toContain('Previously reported');
+    expect(user).toContain('src/a.ts:2');
+    expect(user).toContain('Missing null check');
+  });
+
+  it('skips previous-comment suppression when skip_previous_comments is false', async () => {
+    const octo = makeOctokit([file('src/a.ts')]);
+    const llm = vi.fn(async () => ({
+      findings: [
+        { path: 'src/a.ts', line: 2, severity: 'warning', comment_md: '🔴 SQL built by string concatenation is injectable.' }
+      ]
+    }));
+    const noSkip = { ...cfg, skipPreviousComments: false };
+    const res = await runReview(noSkip, ctx, prInfo, repoInfo, { octokit: octo, llm });
+    expect(octo.rest.pulls.listReviewComments).not.toHaveBeenCalled();
+    expect(res.commentCount).toBe(1);
   });
 });

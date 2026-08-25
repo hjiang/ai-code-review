@@ -16,6 +16,16 @@ export interface InlineComment {
   line: number;
 }
 
+/** Minimal structural subset of a pull-request review comment. */
+export interface ReviewComment {
+  path?: string;
+  line?: number | null;
+  original_line?: number | null;
+  body?: string | null;
+  /** Non-null when this comment is a reply within a thread (not its root). */
+  in_reply_to_id?: number | null;
+}
+
 export interface MinimalOctokit {
   rest: {
     issues: {
@@ -26,6 +36,7 @@ export interface MinimalOctokit {
       listFiles: (p: any) => Promise<{ data: unknown[] }>;
       createReview: (p: any) => Promise<unknown>;
       get: (p: any) => Promise<{ data: any }>;
+      listReviewComments: (p: any) => Promise<{ data: ReviewComment[] }>;
     };
     repos: {
       get: (p: any) => Promise<{ data: any }>;

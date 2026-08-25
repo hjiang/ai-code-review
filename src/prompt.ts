@@ -5,6 +5,7 @@
 
 import type { PrFile } from './diff.js';
 import type { RepoInfo } from './github/reviews.js';
+import type { PreviousComment } from './github/threads.js';
 
 export const SUMMARY_MARKER = '<!-- ai-review:summary -->';
 
@@ -47,6 +48,7 @@ Rules:
 - Cite the line number from the NEW side of the diff.
 - Skip generated, vendored, and dependency-lock content.
 - Every comment must be self-contained markdown: a severity emoji header (🔴 critical / 🟠 warning / 🔵 suggestion), what is wrong, why it matters, and a concrete fix.
+- If an issue is listed under "Previously reported issues" in the request, do NOT re-report it, unless the code has changed such that it is a genuinely new and different problem.
 Output STRICT JSON only, with exactly this shape:
 {"findings": [{"path": string, "line": number, "severity": "critical"|"warning"|"suggestion", "category": string, "comment_md": string, "suggestion_md": string|null}]}
 "line" MUST be a line number that exists in the provided diff on the new side.
@@ -96,13 +98,40 @@ export function buildSummaryMessages(
   ];
 }
 
+const MAX_PREVIOUS = 30;
+const PREVIOUS_BODY_CAP = 120;
+
+/** Compact "previously reported issues" block, capped to stay small. */
+function buildPreviousBlock(previous: PreviousComment[]): string {
+  const lines: string[] = [];
+  for (const c of previous.slice(0, MAX_PREVIOUS)) {
+    const at = c.line ? `${c.path}:${c.line}` : c.path;
+    const body = c.body.length > PREVIOUS_BODY_CAP ? `${c.body.slice(0, PREVIOUS_BODY_CAP)}…` : c.body;
+    lines.push(`- ${at} — ${body}`);
+  }
+  if (previous.length > MAX_PREVIOUS) {
+    lines.push(`- …and ${previous.length - MAX_PREVIOUS} more already-reported issue(s) (do not re-report them either)`);
+  }
+  return [
+    '',
+    'Previously reported issues (already discussed in this PR\'s inline review threads — do NOT re-report these unless the code changed such that it is a genuinely new problem):',
+    ...lines
+  ].join('\n');
+}
+
 /** Messages for an inline review run. */
 export function buildReviewMessages(
   files: PrFile[],
   maxPatchChars: number,
-  repo: RepoInfo
+  repo: RepoInfo,
+  previous: PreviousComment[] = []
 ): Msg[] {
-  const user = [buildRepoContext(repo), '', buildFileSection(files, maxPatchChars)].join('\n');
+  const user = [
+    buildRepoContext(repo),
+    '',
+    buildFileSection(files, maxPatchChars),
+    ...(previous.length > 0 ? [buildPreviousBlock(previous)] : [])
+  ].join('\n');
   return [
     { role: 'system', content: REVIEW_SYSTEM },
     { role: 'user', content: user }

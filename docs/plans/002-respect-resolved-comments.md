@@ -27,15 +27,17 @@ the PR's earlier threads.
 
 - `interface PreviousComment { path: string; line: number | null; body: string }`
 - `fetchPreviousComments(octokit, owner, repo, prNumber)` — paginated
-  `pulls.listReviewThreads` (per_page 100, page cap 10). For every thread
-  (resolved or not) take its **root comment** (comments[0]): `path`,
-  `line ?? original_line ?? null`, trimmed `body`. Empty/comment-less threads
-  are skipped; missing fields tolerated.
+  `pulls.listReviewComments` (per_page 100, page until a short page). For every
+  thread (resolved or not) take its **root comment** — a review comment whose
+  `in_reply_to_id` is null: `path`, `line ?? original_line ?? null`, trimmed
+  `body`. Replies and entries without a path/body are skipped; missing fields
+  tolerated.
 
 ### 2. `src/github/types.ts`
 
-- Extend `MinimalOctokit.pulls` with `listReviewThreads`.
-- Add minimal `ReviewThread` / `ReviewThreadComment` structural types.
+- Extend `MinimalOctokit.pulls` with `listReviewComments`.
+- Add minimal `ReviewComment` structural type (`path`, `line`, `original_line`,
+  `body`, `in_reply_to_id`).
 
 ### 3. `src/prompt.ts` — soft semantic layer (primary)
 
@@ -53,18 +55,19 @@ the PR's earlier threads.
 - `validateFindings(raw, prFiles, log, previous?: PreviousComment[])`.
 - After existing anchor validation + intra-run dedup, drop a finding when the
   **same path** has a previous comment whose normalized text overlaps
-  sufficiently (Jaccard similarity on lowercase alphanumeric tokens, after
+  sufficiently (token containment on lowercase alphanumeric tokens, after
   stripping markdown/severity boilerplate and stopwords). Different path ⇒
   distinct instance ⇒ kept. Drop is logged
   (`review: skipping finding — repeats previously reported comment`).
-- New constants `REPEAT_SIM_THRESHOLD = 0.5`, `REPEAT_MIN_OVERLAP = 4`.
+- New constants `REPEAT_CONTAINMENT_THRESHOLD = 0.5`, `REPEAT_MIN_OVERLAP = 4`.
 - `runReview` fetches previous comments once, passes them to both the prompt
   builder and the validator; counts/body reflect only post-filter findings.
 
 ### 5. `src/util/text.ts`
 
-- `normalizeTokens(text): Set<string>` and `jaccard(a, b): number` helpers
-  (strip emoji/markdown/severity headers, lowercase, drop stopwords/1-char).
+- `normalizeTokens(text): Set<string>` and `tokenContainment(a, b): number`
+  helpers (strip emoji/severity headers + markdown links, lowercase, drop
+  stopwords/1-char; keep ordinary parenthesized content).
 
 ### Config
 
@@ -90,7 +93,7 @@ the PR's earlier threads.
 3. `runReview`: previous comments passed into the LLM prompt; repeat finding
    not posted (createReview gets only new comments).
 4. `prompt.test.ts`: resolved block present/absent; capped.
-5. `util/text.test.ts`: normalization + jaccard helpers.
+5. `util/text.test.ts`: normalization + containment helpers.
 
 ## Acceptance criteria
 

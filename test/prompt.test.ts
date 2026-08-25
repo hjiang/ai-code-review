@@ -166,6 +166,17 @@ describe('buildReviewMessages', () => {
     expect(user.content).toContain('SQL built by string concatenation');
   });
 
+  it('escapes user-authored bodies as single-line JSON strings', () => {
+    const previous = [
+      { path: 'src/auth.ts', line: 12, body: 'Multi\nline with "quotes" and *markdown*' }
+    ];
+    const [, user] = buildReviewMessages(files, 100000, repo, previous);
+    // The body must be collapsed to one line and JSON-quoted so it cannot
+    // break the bullet block or inject prompt instructions.
+    expect(user.content).toContain('src/auth.ts:12 — "Multi line with \\"quotes\\" and *markdown*"');
+    expect(user.content).not.toMatch(/Multi\s*\n/);
+  });
+
   it('caps the previously-reported block at a bounded number of entries', () => {
     const many = Array.from({ length: 200 }, (_, i) => ({
       path: `src/f${i}.ts`,

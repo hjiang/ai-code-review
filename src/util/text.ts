@@ -34,8 +34,12 @@ const STOPWORDS = new Set([
 export function normalizeTokens(text: string): Set<string> {
   const stripped = text
     .replace(/[🔴🟠🔵]/g, ' ')
-    .replace(/[*_`#>]/g, ' ')
-    .replace(/\[\]|\(.*?\)/g, ' ')
+    // Collapse markdown links [label](url) to the label, dropping the URL.
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // Strip remaining markdown decoration and stray brackets. Ordinary
+    // parentheses are left intact so parenthetical content (e.g. "CWE-89")
+    // still contributes tokens.
+    .replace(/[*_`#>\[\]]/g, ' ')
     .toLowerCase();
   const tokens = new Set<string>();
   for (const m of stripped.match(/[a-z0-9]+/g) ?? []) {

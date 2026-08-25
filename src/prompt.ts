@@ -106,8 +106,12 @@ function buildPreviousBlock(previous: PreviousComment[]): string {
   const lines: string[] = [];
   for (const c of previous.slice(0, MAX_PREVIOUS)) {
     const at = c.line ? `${c.path}:${c.line}` : c.path;
-    const body = c.body.length > PREVIOUS_BODY_CAP ? `${c.body.slice(0, PREVIOUS_BODY_CAP)}…` : c.body;
-    lines.push(`- ${at} — ${body}`);
+    // Thread bodies are user-authored, hence untrusted prompt input: collapse
+    // to a single line and JSON-quote so newlines/markdown cannot break the
+    // bullet block or inject prompt instructions.
+    const single = c.body.replace(/\s+/g, ' ').trim();
+    const short = single.length > PREVIOUS_BODY_CAP ? `${single.slice(0, PREVIOUS_BODY_CAP)}…` : single;
+    lines.push(`- ${at} — ${JSON.stringify(short)}`);
   }
   if (previous.length > MAX_PREVIOUS) {
     lines.push(`- …and ${previous.length - MAX_PREVIOUS} more already-reported issue(s) (do not re-report them either)`);

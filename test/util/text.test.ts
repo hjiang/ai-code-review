@@ -15,6 +15,12 @@ describe('normalizeTokens', () => {
   it('drops stopwords and single-character tokens', () => {
     expect(normalizeTokens('use a parameterized query')).toEqual(new Set(['parameterized', 'query']));
   });
+
+  it('keeps content inside ordinary parentheses while collapsing markdown links', () => {
+    expect(
+      normalizeTokens('Use bind params (CWE-89) to prevent [SQL injection](https://example.com/x) HERE')
+    ).toEqual(new Set(['bind', 'params', 'cwe', '89', 'prevent', 'sql', 'injection']));
+  });
 });
 
 describe('tokenContainment', () => {

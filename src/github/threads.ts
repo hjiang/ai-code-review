@@ -12,8 +12,13 @@ export interface PreviousComment {
   body: string;
 }
 
-const MAX_PAGES = 10;
 const PER_PAGE = 100;
+/**
+ * Not a real cap: pagination walks until a short page ends it. This guard only
+ * protects against a runaway/duplicated API response (~100 pages = 10k
+ * comments), far beyond any real PR.
+ */
+const RUNWAY_PAGE_GUARD = 100;
 
 /**
  * Fetch one entry per review thread on the PR, from its root comment (a review
@@ -29,7 +34,7 @@ export async function fetchPreviousComments(
   prNumber: number
 ): Promise<PreviousComment[]> {
   const out: PreviousComment[] = [];
-  for (let page = 1; page <= MAX_PAGES; page++) {
+  for (let page = 1; page <= RUNWAY_PAGE_GUARD; page++) {
     const { data } = await octokit.rest.pulls.listReviewComments({
       owner,
       repo,

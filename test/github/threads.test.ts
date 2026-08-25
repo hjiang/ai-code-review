@@ -74,4 +74,14 @@ describe('fetchPreviousComments', () => {
     await fetchPreviousComments(octo, 'o', 'r', 7);
     expect(octo.rest.pulls.listReviewComments).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps paging past 10 pages until a short page (no fixed page cap)', async () => {
+    const full = Array.from({ length: 100 }, (_, i) => comment(`f${i}.ts`, 1, `b${i}`));
+    const pages = Array.from({ length: 12 }, () => full); // 12 full pages > old cap
+    pages.push([comment('last.ts', 1, 'x')]); // short page terminates the walk
+    const octo = makeOctokit(pages);
+    const out = await fetchPreviousComments(octo, 'o', 'r', 7);
+    expect(out).toHaveLength(12 * 100 + 1);
+    expect(octo.rest.pulls.listReviewComments).toHaveBeenCalledTimes(13);
+  });
 });

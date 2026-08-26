@@ -101,6 +101,9 @@ export function validateFindings(
   const anchorsByPath = new Map<string, Set<number>>();
   const accepted: ValidFinding[] = [];
   const skipped: string[] = [];
+  // Normalize every prior body once up front; reuse the token sets across all
+  // candidate findings so repeat detection is O(findings × prior) → O(prior).
+  const previousTokens = previous.length > 0 ? buildPreviousTokenIndex(previous) : new Map();
 
   for (const raw of findings) {
     const path = raw.path ?? '';
@@ -147,7 +150,7 @@ export function validateFindings(
       }
       continue; // equal/lower severity near-duplicate: silently dropped
     }
-    if (previous.length > 0 && repeatsPrevious(finding, previous)) {
+    if (previousTokens.size > 0 && repeatsPrevious(finding, previousTokens)) {
       skipped.push(`${finding.path}:${finding.line} repeats previously reported comment`);
       continue;
     }
@@ -163,15 +166,11 @@ export function validateFindings(
 }
 
 /**
- * True when `finding` repeats a previously reported comment on the same path.
- * Identical wording in a different file is a distinct instance and is kept.
+ * Index prior comments by path, normalizing each body exactly once so the
+ * token sets can be reused across all findings (avoids re-normalizing every
+ * prior comment per finding on the hot path).
  */
-function repeatsPrevious(finding: ValidFinding, previous: PreviousComment[]): boolean {
-  const fTokens = normalizeTokens(finding.comment_md);
-  if (fTokens.size === 0) return false;
-  // Normalize each prior body once and reuse the token set across every
-  // candidate finding, instead of re-running the regex per finding. With up to
-  // 10k prior comments this avoids repeated work on the hot path.
+function buildPreviousTokenIndex(previous: PreviousComment[]): Map<string, Set<string>[]> {
   const byPath = new Map<string, Set<string>[]>();
   for (const c of previous) {
     const tokens = normalizeTokens(c.body);
@@ -180,7 +179,22 @@ function repeatsPrevious(finding: ValidFinding, previous: PreviousComment[]): bo
     if (list) list.push(tokens);
     else byPath.set(c.path, [tokens]);
   }
-  for (const pTokens of byPath.get(finding.path) ?? []) {
+  return byPath;
+}
+
+/**
+ * True when `finding` repeats a previously reported comment on the same path.
+ * Identical wording in a different file is a distinct instance and is kept.
+ * `previousTokens` is the path-indexed cache built once by
+ * `buildPreviousTokenIndex`.
+ */
+function repeatsPrevious(
+  finding: ValidFinding,
+  previousTokens: Map<string, Set<string>[]>
+): boolean {
+  const fTokens = normalizeTokens(finding.comment_md);
+  if (fTokens.size === 0) return false;
+  for (const pTokens of previousTokens.get(finding.path) ?? []) {
     let shared = 0;
     for (const t of pTokens) if (fTokens.has(t)) shared++;
     if (

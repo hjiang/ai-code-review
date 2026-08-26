@@ -54,8 +54,9 @@ src/
   github/
     comments.ts             # List/find/post issue comments (marker-based dedup)
     reviews.ts              # Create PR review with inline comments
+    threads.ts              # Fetch prior review-thread root comments (repeat guard)
   util/
-    glob.ts, retry.ts       # Glob matching, backoff helper
+    glob.ts, retry.ts, text.ts  # Glob matching, backoff, text-normalization helpers
 test/                       # vitest specs (mirrors src/)
 dist/index.js               # Bundled output (committed)
 ```
@@ -78,8 +79,10 @@ comment body. Idempotency = "one comment containing the marker exists".
 
 ```
 trigger (synchronize|/review|dispatch) ─> context ─> diff fetch ─> filter
-  ─> chunk ─> [prompt+LLM per chunk] ─> merge findings
+  ─> fetch prior review-thread comments (pulls.listReviewComments, root only)
+  ─> chunk ─> [prompt+LLM per chunk, prior comments listed] ─> merge findings
   ─> validate anchors against parsed hunks ─> drop invalid
+  ─> drop findings that repeat a prior comment (same path + text overlap)
   ─> POST /pulls/{n}/reviews { commit_id, body, comments[] }
 ```
 

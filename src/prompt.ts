@@ -5,6 +5,7 @@
 
 import type { PrFile } from './diff.js';
 import type { RepoInfo } from './github/reviews.js';
+import type { PreviousComment } from './github/threads.js';
 
 export const SUMMARY_MARKER = '<!-- ai-review:summary -->';
 
@@ -47,6 +48,7 @@ Rules:
 - Cite the line number from the NEW side of the diff.
 - Skip generated, vendored, and dependency-lock content.
 - Every comment must be self-contained markdown: a severity emoji header (🔴 critical / 🟠 warning / 🔵 suggestion), what is wrong, why it matters, and a concrete fix.
+- If an issue is listed under "Previously reported issues" in the request, do NOT re-report it, unless the code has changed such that it is a genuinely new and different problem.
 Output STRICT JSON only, with exactly this shape:
 {"findings": [{"path": string, "line": number, "severity": "critical"|"warning"|"suggestion", "category": string, "comment_md": string, "suggestion_md": string|null}]}
 "line" MUST be a line number that exists in the provided diff on the new side.
@@ -96,13 +98,53 @@ export function buildSummaryMessages(
   ];
 }
 
+const MAX_PREVIOUS = 30;
+const PREVIOUS_BODY_CAP = 120;
+
+/** Compact "previously reported issues" block, capped to stay small. */
+function buildPreviousBlock(previous: PreviousComment[]): string {
+  const lines: string[] = [];
+  for (const c of previous.slice(0, MAX_PREVIOUS)) {
+    // JSON-quote the location too (not just collapse whitespace) so a crafted
+    // filename with markdown/control characters cannot inject into the bullet
+    // line — consistent with the body handling below.
+    const at = JSON.stringify(
+      (c.line != null ? `${c.path}:${c.line}` : c.path).replace(/\s+/g, ' ').trim()
+    );
+    // Thread bodies are user-authored, hence untrusted prompt input: collapse
+    // to a single line and JSON-quote so newlines/markdown cannot break the
+    // bullet block or inject prompt instructions.
+    const single = c.body.replace(/\s+/g, ' ').trim();
+    const short = single.length > PREVIOUS_BODY_CAP ? `${single.slice(0, PREVIOUS_BODY_CAP)}…` : single;
+    lines.push(`- ${at} — ${JSON.stringify(short)}`);
+  }
+  if (previous.length > MAX_PREVIOUS) {
+    lines.push(`- …and ${previous.length - MAX_PREVIOUS} more already-reported issue(s) (do not re-report them either)`);
+  }
+  return [
+    '',
+    'Previously reported issues (already discussed in this PR\'s inline review threads — do NOT re-report these unless the code changed such that it is a genuinely new problem):',
+    ...lines
+  ].join('\n');
+}
+
 /** Messages for an inline review run. */
 export function buildReviewMessages(
   files: PrFile[],
   maxPatchChars: number,
-  repo: RepoInfo
+  repo: RepoInfo,
+  previous: PreviousComment[] = []
 ): Msg[] {
-  const user = [buildRepoContext(repo), '', buildFileSection(files, maxPatchChars)].join('\n');
+  const previousBlock = previous.length > 0 ? buildPreviousBlock(previous) : '';
+  // Reserve space for the previously-reported block so the file/diff section
+  // and the block together fit within the prompt budget.
+  const diffBudget = previousBlock ? Math.max(0, maxPatchChars - previousBlock.length) : maxPatchChars;
+  const user = [
+    buildRepoContext(repo),
+    '',
+    buildFileSection(files, diffBudget),
+    ...(previousBlock ? [previousBlock] : [])
+  ].join('\n');
   return [
     { role: 'system', content: REVIEW_SYSTEM },
     { role: 'user', content: user }

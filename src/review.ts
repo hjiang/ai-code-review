@@ -7,6 +7,9 @@ import { fetchPrFiles, validAnchors } from './diff.js';
 import { chunkFiles, filterFiles } from './filter.js';
 import { buildReviewMessages } from './prompt.js';
 import { postReview } from './github/reviews.js';
+import { fetchPreviousComments } from './github/threads.js';
+import type { PreviousComment } from './github/threads.js';
+import { normalizeTokens, tokenContainment } from './util/text.js';
 import type { ActionConfig, PrContext } from './context.js';
 import type { PrInfo, RepoInfo } from './github/reviews.js';
 import type { PrFile } from './diff.js';
@@ -54,6 +57,15 @@ const LINE_SNAP_TOLERANCE = 3;
  * near-duplicate comments through.
  */
 const DEDUP_LINE_TOLERANCE = 3;
+/**
+ * Repeat-detection guard against previously reported review comments. A
+ * finding repeats a previous comment when, on the SAME path, it shares at
+ * least REPEAT_MIN_OVERLAP normalized tokens AND the smaller token set is at
+ * least this fraction contained in the larger. Text-based (not positional) so
+ * repeats are caught even when line numbers shift between runs.
+ */
+const REPEAT_CONTAINMENT_THRESHOLD = 0.5;
+const REPEAT_MIN_OVERLAP = 4;
 
 const severityRank: Record<Severity, number> = { critical: 2, warning: 1, suggestion: 0 };
 
@@ -83,11 +95,16 @@ function nearestAnchor(anchors: Set<number>, line: number, tolerance: number): n
 export function validateFindings(
   findings: RawFinding[],
   prFiles: PrFile[],
-  log: (msg: string) => void
+  log: (msg: string) => void,
+  previous: PreviousComment[] = []
 ): ValidFinding[] {
   const anchorsByPath = new Map<string, Set<number>>();
   const accepted: ValidFinding[] = [];
   const skipped: string[] = [];
+  // Normalize every prior body once up front. This removes the re-normalization
+  // regex work from the per-finding comparison, but matching each finding
+  // against prior comments remains O(findings × prior) in the worst case.
+  const previousTokens = previous.length > 0 ? buildPreviousTokenIndex(previous) : new Map();
 
   for (const raw of findings) {
     const path = raw.path ?? '';
@@ -123,6 +140,13 @@ export function validateFindings(
       comment_md: comment,
       suggestion_md: raw.suggestion_md?.trim() || null
     };
+    // Guard against repeats of previously reported PR comments BEFORE the
+    // intra-run near-duplicate branch, so a repeat can never be accepted (or
+    // supersede a non-repeating finding) just because it lands next to one.
+    if (previousTokens.size > 0 && repeatsPrevious(finding, previousTokens)) {
+      skipped.push(`${finding.path}:${finding.line} repeats previously reported comment`);
+      continue;
+    }
     const near = accepted.find(
       (a) => a.path === finding.path && Math.abs(a.line - finding.line) <= DEDUP_LINE_TOLERANCE
     );
@@ -143,6 +167,48 @@ export function validateFindings(
   return accepted
     .sort((a, b) => severityRank[b.severity] - severityRank[a.severity])
     .slice(0, MAX_COMMENTS);
+}
+
+/**
+ * Index prior comments by path, normalizing each body exactly once so the
+ * token sets can be reused across all findings (avoids re-normalizing every
+ * prior comment per finding on the hot path).
+ */
+function buildPreviousTokenIndex(previous: PreviousComment[]): Map<string, Set<string>[]> {
+  const byPath = new Map<string, Set<string>[]>();
+  for (const c of previous) {
+    const tokens = normalizeTokens(c.body);
+    if (tokens.size === 0) continue;
+    const list = byPath.get(c.path);
+    if (list) list.push(tokens);
+    else byPath.set(c.path, [tokens]);
+  }
+  return byPath;
+}
+
+/**
+ * True when `finding` repeats a previously reported comment on the same path.
+ * Identical wording in a different file is a distinct instance and is kept.
+ * `previousTokens` is the path-indexed cache built once by
+ * `buildPreviousTokenIndex`.
+ */
+function repeatsPrevious(
+  finding: ValidFinding,
+  previousTokens: Map<string, Set<string>[]>
+): boolean {
+  const fTokens = normalizeTokens(finding.comment_md);
+  if (fTokens.size === 0) return false;
+  for (const pTokens of previousTokens.get(finding.path) ?? []) {
+    let shared = 0;
+    for (const t of pTokens) if (fTokens.has(t)) shared++;
+    if (
+      shared >= REPEAT_MIN_OVERLAP &&
+      tokenContainment(fTokens, pTokens) >= REPEAT_CONTAINMENT_THRESHOLD
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function severityCounts(findings: ValidFinding[]): Record<Severity, number> {
@@ -188,10 +254,15 @@ export async function runReview(
     return { commentCount: 0, filesReviewed: 0 };
   }
 
+  const previous = await fetchPreviousComments(deps.octokit, ctx.owner, ctx.repo, ctx.prNumber);
+  if (previous.length > 0) {
+    log(`review: ${previous.length} previously reported comment(s) to avoid repeating`);
+  }
+
   const chunks = chunkFiles(kept, cfg.maxPatchChars);
   const rawFindings: RawFinding[] = [];
   for (const chunk of chunks) {
-    const messages = buildReviewMessages(chunk, cfg.maxPatchChars, repoInfo);
+    const messages = buildReviewMessages(chunk, cfg.maxPatchChars, repoInfo, previous);
     const result = (await deps.llm(messages)) as { findings?: unknown };
     if (Array.isArray(result?.findings)) {
       rawFindings.push(...(result.findings as RawFinding[]));
@@ -200,7 +271,7 @@ export async function runReview(
     }
   }
 
-  const valid = validateFindings(rawFindings, kept, log);
+  const valid = validateFindings(rawFindings, kept, log, previous);
   const counts = severityCounts(valid);
   const body =
     `## 🤖 AI Review\n\n` +

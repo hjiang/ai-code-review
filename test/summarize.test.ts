@@ -60,7 +60,8 @@ function makeOctokit(over: Partial<MinimalOctokit['rest']> = {}): MinimalOctokit
       pulls: {
         listFiles: vi.fn(async () => ({ data: [apiFile('a.ts')] })),
         createReview: vi.fn(async () => ({})),
-        get: vi.fn()
+        get: vi.fn(),
+        listReviewComments: vi.fn(async () => ({ data: [] }))
       },
       repos: {
         get: vi.fn(async () => ({ data: {} }))
@@ -131,7 +132,8 @@ describe('runSummary', () => {
       pulls: {
         listFiles: vi.fn(async () => ({ data: [apiFileWithPatch('src/big.ts', bigPatch)] })),
         createReview: vi.fn(async () => ({})),
-        get: vi.fn()
+        get: vi.fn(),
+        listReviewComments: vi.fn(async () => ({ data: [] }))
       }
     });
     const llm = vi.fn(async () => ({ summary_md: 'ok' }));

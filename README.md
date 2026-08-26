@@ -12,7 +12,9 @@ Two features:
 2. **Inline Review** — inline comments on specific diff lines for real issues
    (bugs, security, correctness, performance, …). **Re-triggerable multiple
    times per PR**; each run posts one GitHub PR review so repeat runs are
-   visible as distinct reviews.
+   visible as distinct reviews. Re-runs **do not repeat issues already
+   reported** in existing review threads (resolved or not): prior comments are
+   shown to the LLM and textually-similar repeats are dropped.
 
 > GIF placeholder: demo of the summary comment and an inline review run.
 

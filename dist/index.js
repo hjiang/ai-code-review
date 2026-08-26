@@ -31753,12 +31753,65 @@ class EmptyCompletionError extends Error {
 
 ;// CONCATENATED MODULE: ./src/util/text.ts
 /**
- * Small text helpers for diagnostics.
+ * Small text helpers for diagnostics and semantic comparison.
  */
 /** One-line, newline-escaped, truncated view of arbitrary text for logs. */
 function excerpt(text, max = 600) {
     const truncated = text.length > max ? `${text.slice(0, max)}…(+${text.length - max} more chars)` : text;
     return JSON.stringify(truncated);
+}
+/** Common English function words that carry no topical signal. */
+const STOPWORDS = new Set([
+    'a', 'about', 'above', 'after', 'again', 'all', 'also', 'am', 'an', 'and', 'any', 'are',
+    'as', 'at', 'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but',
+    'by', 'can', 'could', 'did', 'do', 'does', 'doing', 'down', 'during', 'each', 'few', 'for',
+    'from', 'further', 'had', 'has', 'have', 'having', 'he', 'her', 'here', 'hers', 'herself',
+    'him', 'himself', 'his', 'how', 'i', 'if', 'in', 'into', 'is', 'it', 'its', 'itself', 'just',
+    'like', 'may', 'me', 'might', 'more', 'most', 'my', 'myself', 'no', 'nor', 'not', 'now', 'of',
+    'off', 'on', 'once', 'only', 'or', 'other', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
+    'same', 'she', 'should', 'so', 'some', 'such', 'than', 'that', 'the', 'their', 'theirs',
+    'them', 'themselves', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'to',
+    'too', 'under', 'until', 'up', 'very', 'was', 'we', 'were', 'what', 'when', 'where', 'which',
+    'while', 'who', 'whom', 'why', 'will', 'with', 'would', 'you', 'your', 'yours', 'yourself',
+    'yourselves', 'make', 'makes', 'made', 'use', 'uses', 'using', 'used', 'add', 'adds',
+    'added', 'need', 'needs', 'ensure', 'instead'
+]);
+/**
+ * Normalize review-comment text into a set of topical tokens: strip severity
+ * emoji and markdown decoration, lowercase, drop stopwords and single chars.
+ * Used to detect when a new finding repeats a previously reported comment.
+ */
+function normalizeTokens(text) {
+    const stripped = text
+        .replace(/[🔴🟠🔵]/g, ' ')
+        // Collapse markdown links [label](url) to the label, dropping the URL.
+        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+        // Strip remaining markdown decoration and stray brackets. Ordinary
+        // parentheses are left intact so parenthetical content (e.g. "CWE-89")
+        // still contributes tokens.
+        .replace(/[*_`#>\[\]]/g, ' ')
+        .toLowerCase();
+    const tokens = new Set();
+    for (const m of stripped.match(/[a-z0-9]+/g) ?? []) {
+        if (m.length > 1 && !STOPWORDS.has(m))
+            tokens.add(m);
+    }
+    return tokens;
+}
+/**
+ * Fraction of the smaller token set that is contained in the larger set.
+ * 1 when one comment is a subset of the other, 0 when they are disjoint.
+ */
+function tokenContainment(a, b) {
+    if (a.size === 0 || b.size === 0)
+        return 0;
+    const smaller = a.size <= b.size ? a : b;
+    const larger = smaller === a ? b : a;
+    let shared = 0;
+    for (const t of smaller)
+        if (larger.has(t))
+            shared++;
+    return shared / smaller.size;
 }
 
 ;// CONCATENATED MODULE: ./src/llm/openai.ts
@@ -32664,6 +32717,7 @@ Rules:
 - Cite the line number from the NEW side of the diff.
 - Skip generated, vendored, and dependency-lock content.
 - Every comment must be self-contained markdown: a severity emoji header (🔴 critical / 🟠 warning / 🔵 suggestion), what is wrong, why it matters, and a concrete fix.
+- If an issue is listed under "Previously reported issues" in the request, do NOT re-report it, unless the code has changed such that it is a genuinely new and different problem.
 Output STRICT JSON only, with exactly this shape:
 {"findings": [{"path": string, "line": number, "severity": "critical"|"warning"|"suggestion", "category": string, "comment_md": string, "suggestion_md": string|null}]}
 "line" MUST be a line number that exists in the provided diff on the new side.
@@ -32703,13 +32757,97 @@ function buildSummaryMessages(pr, files, maxPatchChars, repo) {
         { role: 'user', content: user }
     ];
 }
+const MAX_PREVIOUS = 30;
+const PREVIOUS_BODY_CAP = 120;
+/** Compact "previously reported issues" block, capped to stay small. */
+function buildPreviousBlock(previous) {
+    const lines = [];
+    for (const c of previous.slice(0, MAX_PREVIOUS)) {
+        // JSON-quote the location too (not just collapse whitespace) so a crafted
+        // filename with markdown/control characters cannot inject into the bullet
+        // line — consistent with the body handling below.
+        const at = JSON.stringify((c.line != null ? `${c.path}:${c.line}` : c.path).replace(/\s+/g, ' ').trim());
+        // Thread bodies are user-authored, hence untrusted prompt input: collapse
+        // to a single line and JSON-quote so newlines/markdown cannot break the
+        // bullet block or inject prompt instructions.
+        const single = c.body.replace(/\s+/g, ' ').trim();
+        const short = single.length > PREVIOUS_BODY_CAP ? `${single.slice(0, PREVIOUS_BODY_CAP)}…` : single;
+        lines.push(`- ${at} — ${JSON.stringify(short)}`);
+    }
+    if (previous.length > MAX_PREVIOUS) {
+        lines.push(`- …and ${previous.length - MAX_PREVIOUS} more already-reported issue(s) (do not re-report them either)`);
+    }
+    return [
+        '',
+        'Previously reported issues (already discussed in this PR\'s inline review threads — do NOT re-report these unless the code changed such that it is a genuinely new problem):',
+        ...lines
+    ].join('\n');
+}
 /** Messages for an inline review run. */
-function buildReviewMessages(files, maxPatchChars, repo) {
-    const user = [buildRepoContext(repo), '', buildFileSection(files, maxPatchChars)].join('\n');
+function buildReviewMessages(files, maxPatchChars, repo, previous = []) {
+    const previousBlock = previous.length > 0 ? buildPreviousBlock(previous) : '';
+    // Reserve space for the previously-reported block so the file/diff section
+    // and the block together fit within the prompt budget.
+    const diffBudget = previousBlock ? Math.max(0, maxPatchChars - previousBlock.length) : maxPatchChars;
+    const user = [
+        buildRepoContext(repo),
+        '',
+        buildFileSection(files, diffBudget),
+        ...(previousBlock ? [previousBlock] : [])
+    ].join('\n');
     return [
         { role: 'system', content: REVIEW_SYSTEM },
         { role: 'user', content: user }
     ];
+}
+
+;// CONCATENATED MODULE: ./src/github/threads.ts
+/**
+ * Previously reported inline review comments (one per review thread), used so
+ * a re-run does not repeat issues the PR has already discussed — resolved or
+ * not.
+ */
+const PER_PAGE = 100;
+/**
+ * Not a real cap: pagination walks until a short page ends it. This guard only
+ * protects against a runaway/duplicated API response (~100 pages = 10k
+ * comments), far beyond any real PR.
+ */
+const RUNWAY_PAGE_GUARD = 100;
+/**
+ * Fetch one entry per review thread on the PR, from its root comment (a review
+ * comment with no `in_reply_to_id` starts a thread; replies belong to it). Both
+ * resolved and open threads are included — a resolved thread is just as much a
+ * previously-reported issue as an open one. Entries without a path or a
+ * non-empty body are skipped: they cannot be matched anyway.
+ */
+async function fetchPreviousComments(octokit, owner, repo, prNumber) {
+    const out = [];
+    for (let page = 1; page <= RUNWAY_PAGE_GUARD; page++) {
+        const { data } = await octokit.rest.pulls.listReviewComments({
+            owner,
+            repo,
+            pull_number: prNumber,
+            per_page: PER_PAGE,
+            page
+        });
+        for (const c of data) {
+            if (c.in_reply_to_id != null)
+                continue; // reply within a thread, not a new issue
+            const path = c.path?.trim();
+            const body = c.body?.trim();
+            if (!path || !body)
+                continue;
+            out.push({
+                path,
+                line: c.line ?? c.original_line ?? null,
+                body
+            });
+        }
+        if (data.length < PER_PAGE)
+            break;
+    }
+    return out;
 }
 
 ;// CONCATENATED MODULE: ./src/review.ts
@@ -32717,6 +32855,8 @@ function buildReviewMessages(files, maxPatchChars, repo) {
  * Review mode: inline review comments on the PR diff, re-triggerable. Each run
  * posts one PR review so repeated runs appear as distinct reviews.
  */
+
+
 
 
 
@@ -32731,6 +32871,15 @@ const LINE_SNAP_TOLERANCE = 3;
  * near-duplicate comments through.
  */
 const DEDUP_LINE_TOLERANCE = 3;
+/**
+ * Repeat-detection guard against previously reported review comments. A
+ * finding repeats a previous comment when, on the SAME path, it shares at
+ * least REPEAT_MIN_OVERLAP normalized tokens AND the smaller token set is at
+ * least this fraction contained in the larger. Text-based (not positional) so
+ * repeats are caught even when line numbers shift between runs.
+ */
+const REPEAT_CONTAINMENT_THRESHOLD = 0.5;
+const REPEAT_MIN_OVERLAP = 4;
 const severityRank = { critical: 2, warning: 1, suggestion: 0 };
 function resolveFile(path, prFiles) {
     const exact = prFiles.find((f) => f.filename === path);
@@ -32757,10 +32906,14 @@ function nearestAnchor(anchors, line, tolerance) {
  * keeping the highest severity (first-seen wins ties) and capped at
  * MAX_COMMENTS. Never returns an anchor GitHub would reject.
  */
-function validateFindings(findings, prFiles, log) {
+function validateFindings(findings, prFiles, log, previous = []) {
     const anchorsByPath = new Map();
     const accepted = [];
     const skipped = [];
+    // Normalize every prior body once up front. This removes the re-normalization
+    // regex work from the per-finding comparison, but matching each finding
+    // against prior comments remains O(findings × prior) in the worst case.
+    const previousTokens = previous.length > 0 ? buildPreviousTokenIndex(previous) : new Map();
     for (const raw of findings) {
         const path = raw.path ?? '';
         const line = typeof raw.line === 'number' ? raw.line : NaN;
@@ -32795,6 +32948,13 @@ function validateFindings(findings, prFiles, log) {
             comment_md: comment,
             suggestion_md: raw.suggestion_md?.trim() || null
         };
+        // Guard against repeats of previously reported PR comments BEFORE the
+        // intra-run near-duplicate branch, so a repeat can never be accepted (or
+        // supersede a non-repeating finding) just because it lands next to one.
+        if (previousTokens.size > 0 && repeatsPrevious(finding, previousTokens)) {
+            skipped.push(`${finding.path}:${finding.line} repeats previously reported comment`);
+            continue;
+        }
         const near = accepted.find((a) => a.path === finding.path && Math.abs(a.line - finding.line) <= DEDUP_LINE_TOLERANCE);
         if (near) {
             if (severityRank[finding.severity] > severityRank[near.severity]) {
@@ -32813,6 +32973,47 @@ function validateFindings(findings, prFiles, log) {
     return accepted
         .sort((a, b) => severityRank[b.severity] - severityRank[a.severity])
         .slice(0, MAX_COMMENTS);
+}
+/**
+ * Index prior comments by path, normalizing each body exactly once so the
+ * token sets can be reused across all findings (avoids re-normalizing every
+ * prior comment per finding on the hot path).
+ */
+function buildPreviousTokenIndex(previous) {
+    const byPath = new Map();
+    for (const c of previous) {
+        const tokens = normalizeTokens(c.body);
+        if (tokens.size === 0)
+            continue;
+        const list = byPath.get(c.path);
+        if (list)
+            list.push(tokens);
+        else
+            byPath.set(c.path, [tokens]);
+    }
+    return byPath;
+}
+/**
+ * True when `finding` repeats a previously reported comment on the same path.
+ * Identical wording in a different file is a distinct instance and is kept.
+ * `previousTokens` is the path-indexed cache built once by
+ * `buildPreviousTokenIndex`.
+ */
+function repeatsPrevious(finding, previousTokens) {
+    const fTokens = normalizeTokens(finding.comment_md);
+    if (fTokens.size === 0)
+        return false;
+    for (const pTokens of previousTokens.get(finding.path) ?? []) {
+        let shared = 0;
+        for (const t of pTokens)
+            if (fTokens.has(t))
+                shared++;
+        if (shared >= REPEAT_MIN_OVERLAP &&
+            tokenContainment(fTokens, pTokens) >= REPEAT_CONTAINMENT_THRESHOLD) {
+            return true;
+        }
+    }
+    return false;
 }
 function severityCounts(findings) {
     return {
@@ -32847,10 +33048,14 @@ async function runReview(cfg, ctx, prInfo, repoInfo, deps) {
         });
         return { commentCount: 0, filesReviewed: 0 };
     }
+    const previous = await fetchPreviousComments(deps.octokit, ctx.owner, ctx.repo, ctx.prNumber);
+    if (previous.length > 0) {
+        log(`review: ${previous.length} previously reported comment(s) to avoid repeating`);
+    }
     const chunks = chunkFiles(kept, cfg.maxPatchChars);
     const rawFindings = [];
     for (const chunk of chunks) {
-        const messages = buildReviewMessages(chunk, cfg.maxPatchChars, repoInfo);
+        const messages = buildReviewMessages(chunk, cfg.maxPatchChars, repoInfo, previous);
         const result = (await deps.llm(messages));
         if (Array.isArray(result?.findings)) {
             rawFindings.push(...result.findings);
@@ -32859,7 +33064,7 @@ async function runReview(cfg, ctx, prInfo, repoInfo, deps) {
             log('review: LLM reply had no findings array, ignoring chunk output');
         }
     }
-    const valid = validateFindings(rawFindings, kept, log);
+    const valid = validateFindings(rawFindings, kept, log, previous);
     const counts = severityCounts(valid);
     const body = `## 🤖 AI Review\n\n` +
         `Model: \`${cfg.model}\` · Files reviewed: ${kept.length}\n\n` +
@@ -32886,7 +33091,7 @@ async function runReview(cfg, ctx, prInfo, repoInfo, deps) {
  * Issue comment helpers: marker-based idempotency lookup and posting.
  */
 const MAX_PAGES = 10;
-const PER_PAGE = 100;
+const comments_PER_PAGE = 100;
 /**
  * Find the bot's own issue comment that carries `marker` (e.g. the summary
  * marker). Pages through comments until found or the page cap is reached.
@@ -32898,7 +33103,7 @@ async function findMarkerComment(octokit, owner, repo, prNumber, marker, botLogi
             owner,
             repo,
             issue_number: prNumber,
-            per_page: PER_PAGE,
+            per_page: comments_PER_PAGE,
             page
         });
         for (const comment of data) {
@@ -32909,7 +33114,7 @@ async function findMarkerComment(octokit, owner, repo, prNumber, marker, botLogi
                 return comment;
             }
         }
-        if (data.length < PER_PAGE)
+        if (data.length < comments_PER_PAGE)
             break;
     }
     return null;

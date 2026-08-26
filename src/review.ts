@@ -101,8 +101,9 @@ export function validateFindings(
   const anchorsByPath = new Map<string, Set<number>>();
   const accepted: ValidFinding[] = [];
   const skipped: string[] = [];
-  // Normalize every prior body once up front; reuse the token sets across all
-  // candidate findings so repeat detection is O(findings × prior) → O(prior).
+  // Normalize every prior body once up front. This removes the re-normalization
+  // regex work from the per-finding comparison, but matching each finding
+  // against prior comments remains O(findings × prior) in the worst case.
   const previousTokens = previous.length > 0 ? buildPreviousTokenIndex(previous) : new Map();
 
   for (const raw of findings) {

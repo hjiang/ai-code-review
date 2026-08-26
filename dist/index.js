@@ -32763,7 +32763,9 @@ const PREVIOUS_BODY_CAP = 120;
 function buildPreviousBlock(previous) {
     const lines = [];
     for (const c of previous.slice(0, MAX_PREVIOUS)) {
-        const at = c.line != null ? `${c.path}:${c.line}` : c.path;
+        // Collapse the path:line prefix to a single line too, so an unusual
+        // filename (whitespace/newlines) cannot break the bullet structure.
+        const at = (c.line != null ? `${c.path}:${c.line}` : c.path).replace(/\s+/g, ' ').trim();
         // Thread bodies are user-authored, hence untrusted prompt input: collapse
         // to a single line and JSON-quote so newlines/markdown cannot break the
         // bullet block or inject prompt instructions.
@@ -32903,8 +32905,9 @@ function validateFindings(findings, prFiles, log, previous = []) {
     const anchorsByPath = new Map();
     const accepted = [];
     const skipped = [];
-    // Normalize every prior body once up front; reuse the token sets across all
-    // candidate findings so repeat detection is O(findings × prior) → O(prior).
+    // Normalize every prior body once up front. This removes the re-normalization
+    // regex work from the per-finding comparison, but matching each finding
+    // against prior comments remains O(findings × prior) in the worst case.
     const previousTokens = previous.length > 0 ? buildPreviousTokenIndex(previous) : new Map();
     for (const raw of findings) {
         const path = raw.path ?? '';

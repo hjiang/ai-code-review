@@ -32784,11 +32784,15 @@ function buildPreviousBlock(previous) {
 }
 /** Messages for an inline review run. */
 function buildReviewMessages(files, maxPatchChars, repo, previous = []) {
+    const previousBlock = previous.length > 0 ? buildPreviousBlock(previous) : '';
+    // Reserve space for the previously-reported block so the file/diff section
+    // and the block together fit within the prompt budget.
+    const diffBudget = previousBlock ? Math.max(0, maxPatchChars - previousBlock.length) : maxPatchChars;
     const user = [
         buildRepoContext(repo),
         '',
-        buildFileSection(files, maxPatchChars),
-        ...(previous.length > 0 ? [buildPreviousBlock(previous)] : [])
+        buildFileSection(files, diffBudget),
+        ...(previousBlock ? [previousBlock] : [])
     ].join('\n');
     return [
         { role: 'system', content: REVIEW_SYSTEM },

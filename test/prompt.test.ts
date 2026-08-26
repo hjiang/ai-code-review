@@ -166,6 +166,25 @@ describe('buildReviewMessages', () => {
     expect(user.content).toContain('SQL built by string concatenation');
   });
 
+  it('reserves budget for the previously-reported block', () => {
+    // A large previous block must shrink the file/diff section so the block
+    // and the diff do not exceed the prompt budget.
+    const bigPrevious = Array.from({ length: 30 }, (_, i) => ({
+      path: 'src/auth.ts',
+      line: 12 + i,
+      body: 'x'.repeat(120)
+    }));
+    const [, user] = buildReviewMessages(files, 300, repo, bigPrevious);
+    const diffIdx = user.content.indexOf('Diffs:');
+    const prevIdx = user.content.indexOf('Previously reported');
+    expect(diffIdx).toBeGreaterThan(-1);
+    expect(prevIdx).toBeGreaterThan(-1);
+    // The diff section (from 'Diffs:' to the previous block) must be capped
+    // down to the leftover budget, not carry the full diff.
+    expect(user.content).toContain('truncated');
+    expect(prevIdx - diffIdx).toBeLessThan(300);
+  });
+
   it('escapes user-authored bodies as single-line JSON strings', () => {
     const previous = [
       { path: 'src/auth.ts', line: 12, body: 'Multi\nline with "quotes" and *markdown*' }

@@ -43,7 +43,7 @@ export async function fetchPreviousComments(
       page
     });
     for (const c of data) {
-      if (c.in_reply_to_id) continue; // reply within a thread, not a new issue
+      if (c.in_reply_to_id != null) continue; // reply within a thread, not a new issue
       const path = c.path?.trim();
       const body = c.body?.trim();
       if (!path || !body) continue;

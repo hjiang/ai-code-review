@@ -169,10 +169,18 @@ export function validateFindings(
 function repeatsPrevious(finding: ValidFinding, previous: PreviousComment[]): boolean {
   const fTokens = normalizeTokens(finding.comment_md);
   if (fTokens.size === 0) return false;
+  // Normalize each prior body once and reuse the token set across every
+  // candidate finding, instead of re-running the regex per finding. With up to
+  // 10k prior comments this avoids repeated work on the hot path.
+  const byPath = new Map<string, Set<string>[]>();
   for (const c of previous) {
-    if (c.path !== finding.path) continue;
-    const pTokens = normalizeTokens(c.body);
-    if (pTokens.size === 0) continue;
+    const tokens = normalizeTokens(c.body);
+    if (tokens.size === 0) continue;
+    const list = byPath.get(c.path);
+    if (list) list.push(tokens);
+    else byPath.set(c.path, [tokens]);
+  }
+  for (const pTokens of byPath.get(finding.path) ?? []) {
     let shared = 0;
     for (const t of pTokens) if (fTokens.has(t)) shared++;
     if (

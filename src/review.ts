@@ -140,6 +140,13 @@ export function validateFindings(
       comment_md: comment,
       suggestion_md: raw.suggestion_md?.trim() || null
     };
+    // Guard against repeats of previously reported PR comments BEFORE the
+    // intra-run near-duplicate branch, so a repeat can never be accepted (or
+    // supersede a non-repeating finding) just because it lands next to one.
+    if (previousTokens.size > 0 && repeatsPrevious(finding, previousTokens)) {
+      skipped.push(`${finding.path}:${finding.line} repeats previously reported comment`);
+      continue;
+    }
     const near = accepted.find(
       (a) => a.path === finding.path && Math.abs(a.line - finding.line) <= DEDUP_LINE_TOLERANCE
     );
@@ -150,10 +157,6 @@ export function validateFindings(
         Object.assign(near, finding);
       }
       continue; // equal/lower severity near-duplicate: silently dropped
-    }
-    if (previousTokens.size > 0 && repeatsPrevious(finding, previousTokens)) {
-      skipped.push(`${finding.path}:${finding.line} repeats previously reported comment`);
-      continue;
     }
     accepted.push(finding);
   }

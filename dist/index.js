@@ -32763,9 +32763,10 @@ const PREVIOUS_BODY_CAP = 120;
 function buildPreviousBlock(previous) {
     const lines = [];
     for (const c of previous.slice(0, MAX_PREVIOUS)) {
-        // Collapse the path:line prefix to a single line too, so an unusual
-        // filename (whitespace/newlines) cannot break the bullet structure.
-        const at = (c.line != null ? `${c.path}:${c.line}` : c.path).replace(/\s+/g, ' ').trim();
+        // JSON-quote the location too (not just collapse whitespace) so a crafted
+        // filename with markdown/control characters cannot inject into the bullet
+        // line — consistent with the body handling below.
+        const at = JSON.stringify((c.line != null ? `${c.path}:${c.line}` : c.path).replace(/\s+/g, ' ').trim());
         // Thread bodies are user-authored, hence untrusted prompt input: collapse
         // to a single line and JSON-quote so newlines/markdown cannot break the
         // bullet block or inject prompt instructions.
@@ -32947,6 +32948,13 @@ function validateFindings(findings, prFiles, log, previous = []) {
             comment_md: comment,
             suggestion_md: raw.suggestion_md?.trim() || null
         };
+        // Guard against repeats of previously reported PR comments BEFORE the
+        // intra-run near-duplicate branch, so a repeat can never be accepted (or
+        // supersede a non-repeating finding) just because it lands next to one.
+        if (previousTokens.size > 0 && repeatsPrevious(finding, previousTokens)) {
+            skipped.push(`${finding.path}:${finding.line} repeats previously reported comment`);
+            continue;
+        }
         const near = accepted.find((a) => a.path === finding.path && Math.abs(a.line - finding.line) <= DEDUP_LINE_TOLERANCE);
         if (near) {
             if (severityRank[finding.severity] > severityRank[near.severity]) {
@@ -32955,10 +32963,6 @@ function validateFindings(findings, prFiles, log, previous = []) {
                 Object.assign(near, finding);
             }
             continue; // equal/lower severity near-duplicate: silently dropped
-        }
-        if (previousTokens.size > 0 && repeatsPrevious(finding, previousTokens)) {
-            skipped.push(`${finding.path}:${finding.line} repeats previously reported comment`);
-            continue;
         }
         accepted.push(finding);
     }

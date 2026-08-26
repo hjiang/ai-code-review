@@ -190,10 +190,20 @@ describe('buildReviewMessages', () => {
       { path: 'src/auth.ts', line: 12, body: 'Multi\nline with "quotes" and *markdown*' }
     ];
     const [, user] = buildReviewMessages(files, 100000, repo, previous);
-    // The body must be collapsed to one line and JSON-quoted so it cannot
-    // break the bullet block or inject prompt instructions.
-    expect(user.content).toContain('src/auth.ts:12 — "Multi line with \\"quotes\\" and *markdown*"');
+    // Both the location and the body must be collapsed and JSON-quoted so they
+    // cannot break the bullet block or inject prompt instructions.
+    expect(user.content).toContain('"src/auth.ts:12" — "Multi line with \\"quotes\\" and *markdown*"');
     expect(user.content).not.toMatch(/Multi\s*\n/);
+  });
+
+  it('JSON-quotes the location so a crafted filename cannot inject markdown', () => {
+    const previous = [
+      { path: 'src/`evil`*.ts', line: 12, body: 'body' }
+    ];
+    const [, user] = buildReviewMessages(files, 100000, repo, previous);
+    // The raw backticks/asterisks must be neutralized inside a JSON string
+    // literal ("..."), not injected as raw markdown.
+    expect(user.content).toContain('"src/`evil`*.ts:12" — "body"');
   });
 
   it('caps the previously-reported block at a bounded number of entries', () => {

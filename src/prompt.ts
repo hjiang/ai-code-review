@@ -105,9 +105,12 @@ const PREVIOUS_BODY_CAP = 120;
 function buildPreviousBlock(previous: PreviousComment[]): string {
   const lines: string[] = [];
   for (const c of previous.slice(0, MAX_PREVIOUS)) {
-    // Collapse the path:line prefix to a single line too, so an unusual
-    // filename (whitespace/newlines) cannot break the bullet structure.
-    const at = (c.line != null ? `${c.path}:${c.line}` : c.path).replace(/\s+/g, ' ').trim();
+    // JSON-quote the location too (not just collapse whitespace) so a crafted
+    // filename with markdown/control characters cannot inject into the bullet
+    // line — consistent with the body handling below.
+    const at = JSON.stringify(
+      (c.line != null ? `${c.path}:${c.line}` : c.path).replace(/\s+/g, ' ').trim()
+    );
     // Thread bodies are user-authored, hence untrusted prompt input: collapse
     // to a single line and JSON-quote so newlines/markdown cannot break the
     // bullet block or inject prompt instructions.

@@ -340,6 +340,28 @@ describe('validateFindings with previously reported comments', () => {
     );
     expect(logs.some((l) => l.includes('previously reported'))).toBe(true);
   });
+
+  it('drops a repeat that lands next to an accepted finding (does not supersede it)', () => {
+    const patch = `@@ -1,12 +1,12 @@\n${Array.from({ length: 12 }, (_, i) => `+line${i}`).join('\n')}\n`;
+    const wide = [file('src/wide.ts', patch)];
+    const repeatBody = 'SQL built by string concatenation is injectable. Use parameterized queries.';
+    const samePathPrevious = [{ path: 'src/wide.ts', line: 2, body: repeatBody }];
+    const out = validateFindings(
+      [
+        { path: 'src/wide.ts', line: 3, severity: 'warning', comment_md: 'a genuinely new issue' },
+        { path: 'src/wide.ts', line: 4, severity: 'critical', comment_md: repeatBody }
+      ],
+      wide,
+      noop,
+      samePathPrevious
+    );
+    // The second finding repeats a previously reported comment, so it must be
+    // dropped even though it is within the intra-run dedup tolerance of the
+    // first — and it must not overwrite the non-repeat first finding.
+    expect(out).toHaveLength(1);
+    expect(out[0].comment_md).toBe('a genuinely new issue');
+    expect(out[0].severity).toBe('warning');
+  });
 });
 
 describe('runReview', () => {

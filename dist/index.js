@@ -31784,8 +31784,12 @@ const STOPWORDS = new Set([
 function normalizeTokens(text) {
     const stripped = text
         .replace(/[🔴🟠🔵]/g, ' ')
-        .replace(/[*_`#>]/g, ' ')
-        .replace(/\[\]|\(.*?\)/g, ' ')
+        // Collapse markdown links [label](url) to the label, dropping the URL.
+        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+        // Strip remaining markdown decoration and stray brackets. Ordinary
+        // parentheses are left intact so parenthetical content (e.g. "CWE-89")
+        // still contributes tokens.
+        .replace(/[*_`#>\[\]]/g, ' ')
         .toLowerCase();
     const tokens = new Set();
     for (const m of stripped.match(/[a-z0-9]+/g) ?? []) {
@@ -32760,8 +32764,12 @@ function buildPreviousBlock(previous) {
     const lines = [];
     for (const c of previous.slice(0, MAX_PREVIOUS)) {
         const at = c.line ? `${c.path}:${c.line}` : c.path;
-        const body = c.body.length > PREVIOUS_BODY_CAP ? `${c.body.slice(0, PREVIOUS_BODY_CAP)}…` : c.body;
-        lines.push(`- ${at} — ${body}`);
+        // Thread bodies are user-authored, hence untrusted prompt input: collapse
+        // to a single line and JSON-quote so newlines/markdown cannot break the
+        // bullet block or inject prompt instructions.
+        const single = c.body.replace(/\s+/g, ' ').trim();
+        const short = single.length > PREVIOUS_BODY_CAP ? `${single.slice(0, PREVIOUS_BODY_CAP)}…` : single;
+        lines.push(`- ${at} — ${JSON.stringify(short)}`);
     }
     if (previous.length > MAX_PREVIOUS) {
         lines.push(`- …and ${previous.length - MAX_PREVIOUS} more already-reported issue(s) (do not re-report them either)`);
@@ -32792,8 +32800,13 @@ function buildReviewMessages(files, maxPatchChars, repo, previous = []) {
  * a re-run does not repeat issues the PR has already discussed — resolved or
  * not.
  */
-const MAX_PAGES = 10;
 const PER_PAGE = 100;
+/**
+ * Not a real cap: pagination walks until a short page ends it. This guard only
+ * protects against a runaway/duplicated API response (~100 pages = 10k
+ * comments), far beyond any real PR.
+ */
+const RUNWAY_PAGE_GUARD = 100;
 /**
  * Fetch one entry per review thread on the PR, from its root comment (a review
  * comment with no `in_reply_to_id` starts a thread; replies belong to it). Both
@@ -32803,7 +32816,7 @@ const PER_PAGE = 100;
  */
 async function fetchPreviousComments(octokit, owner, repo, prNumber) {
     const out = [];
-    for (let page = 1; page <= MAX_PAGES; page++) {
+    for (let page = 1; page <= RUNWAY_PAGE_GUARD; page++) {
         const { data } = await octokit.rest.pulls.listReviewComments({
             owner,
             repo,
@@ -33047,7 +33060,7 @@ async function runReview(cfg, ctx, prInfo, repoInfo, deps) {
 /**
  * Issue comment helpers: marker-based idempotency lookup and posting.
  */
-const comments_MAX_PAGES = 10;
+const MAX_PAGES = 10;
 const comments_PER_PAGE = 100;
 /**
  * Find the bot's own issue comment that carries `marker` (e.g. the summary
@@ -33055,7 +33068,7 @@ const comments_PER_PAGE = 100;
  * Author is matched case-insensitively against `botLogin`.
  */
 async function findMarkerComment(octokit, owner, repo, prNumber, marker, botLogin) {
-    for (let page = 1; page <= comments_MAX_PAGES; page++) {
+    for (let page = 1; page <= MAX_PAGES; page++) {
         const { data } = await octokit.rest.issues.listComments({
             owner,
             repo,

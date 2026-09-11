@@ -22,6 +22,7 @@ npm run build       # ncc bundle src/index.ts -> dist/index.js
 
 **`dist/index.js` is committed.** After any change to `src/`, run
 `npm run build` and include the rebuilt `dist/` in the same commit.
+(`test/dist-freshness.test.ts` fails on a stale bundle.)
 
 ## Layout
 

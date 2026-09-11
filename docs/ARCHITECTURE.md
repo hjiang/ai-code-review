@@ -7,6 +7,10 @@
   auto-provision the declared node runtime externals). No other runtime deps.
 - **Language**: TypeScript, strict mode.
 - **Build**: `@vercel/ncc` bundles `src/index.ts` -> single-file `dist/index.js`
+  (committed; consumers execute the bundle, never `src/`).
+  `test/dist-freshness.test.ts` fails when `src/` changed but `dist/` was
+  not rebuilt — run `npm run build` and commit the bundle in the same
+  change (stale-bundle incident: posta PR #45, run 34452530075).
   committed to the repo (standard for composite/marketplace actions).
 - **Tests**: `vitest` with mocked `fetch` and mocked `@actions/github`.
 - **Dev environment**: Nix flake (`nix develop`, or direnv via `.envrc`)

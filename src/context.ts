@@ -121,12 +121,15 @@ export function loadConfig(reader: InputReader): ActionConfig {
     }
   } else if (/api\.deepseek\.com/i.test(baseUrl)) {
     // DeepSeek's API defaults thinking to ENABLED (documented at
-    // https://api-docs.deepseek.com) and its v4 reasoning models spend their
-    // whole token budget on reasoning_content for review-sized prompts,
-    // returning empty content (measured: 100% of 8k/16k budgets). Opt DeepSeek
-    // reviews out of thinking mode unless the user configures extra_body
-    // themselves (an explicit extra_body always wins).
-    extraBody = { thinking: { type: 'disabled' } };
+    // https://api-docs.deepseek.com). v4-flash reasoning burned the whole
+    // token budget on reasoning_content for review-sized prompts, so this
+    // action used to auto-disable thinking. DeepSeek-V4.1-Flash (model
+    // `deepseek-flash`) added a reasoning-effort control and improved
+    // reasoning efficiency, so we now pin thinking ON at `low` effort
+    // instead: the review keeps a bounded chain-of-thought without the
+    // budget burn (an explicit extra_body always wins, e.g. set
+    // {"thinking":{"type":"disabled"}} to opt back out).
+    extraBody = { thinking: { type: 'enabled' }, reasoning_effort: 'low' };
   }
 
   return {

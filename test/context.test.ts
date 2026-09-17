@@ -83,14 +83,16 @@ describe('loadConfig', () => {
     expect(() => loadConfig(reader({ extra_body: '[1,2]' }))).toThrow(/extra_body/i);
   });
 
-  it('auto-disables thinking for DeepSeek base URLs when extra_body is unset', () => {
-    // DeepSeek's API defaults thinking to ENABLED (documented) and its v4
-    // reasoning models burn the whole token budget on reasoning_content for
-    // review-sized prompts -> empty content. So the action opts DeepSeek out
-    // unless the user configures extra_body themselves.
+  it('auto-enables thinking at low effort for DeepSeek base URLs when extra_body is unset', () => {
+    // DeepSeek's API defaults thinking to ENABLED (documented). v4-flash burned
+    // the whole token budget on reasoning_content -> the action used to disable
+    // it; since V4.1-Flash (deepseek-flash) added effort control and improved
+    // reasoning efficiency, the action instead pins thinking ON with a low
+    // effort so reviews get reasoning benefits without the budget burn.
     for (const base of ['https://api.deepseek.com', 'https://api.deepseek.com/v1']) {
       expect(loadConfig(reader({ api_base_url: base })).extraBody).toEqual({
-        thinking: { type: 'disabled' }
+        thinking: { type: 'enabled' },
+        reasoning_effort: 'low'
       });
     }
   });

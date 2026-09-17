@@ -131,7 +131,7 @@ also use **Run workflow** (workflow_dispatch) and give it a PR number.
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
 | Anthropic | `https://api.anthropic.com` | `claude-sonnet-4-5` |
 | OpenRouter | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4` |
-| DeepSeek | `https://api.deepseek.com` | `deepseek-v4-flash` (thinking auto-disabled; see Notes) |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-flash` (thinking auto-enabled at low effort; see Notes) |
 | Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
 | Together | `https://api.together.xyz/v1` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
 | Ollama (local) | `http://localhost:11434/v1` | `qwen2.5-coder:14b` |
@@ -153,8 +153,8 @@ Anthropic adapter; everything else uses the OpenAI adapter. Override with the
 | `provider` | no | `auto` | `openai` \| `anthropic` \| `auto` |
 | `max_tokens` | no | `8192` | Completion budget |
 | `temperature` | no | `0.2` | |
-| `response_format` | no | `auto` | `auto` \| `off`. `auto` sends `response_format: json_object` and auto-retries without it on an empty/rejected completion; `off` never sends it. **Set `off` for reasoning models** (e.g. `deepseek-v4-flash`): with `json_object` they can burn the whole token budget on reasoning and return empty content.
-| `extra_body` | no | - | Optional JSON object merged into the LLM request body (user keys win). For reasoning models that support it, disable thinking entirely: `{"thinking":{"type":"disabled"}}` (do **not** use `reasoning_effort: "low"` - see Notes). Retried once without it if the provider rejects it with 400. |
+| `response_format` | no | `auto` | `auto` \| `off`. `auto` sends `response_format: json_object` and auto-retries without it on an empty/rejected completion; `off` never sends it. with `json_object` they can burn the whole token budget on reasoning and return empty content; the action also auto-retries without it in that case, so `auto` stays the recommended default.
+| `extra_body` | no | - | Optional JSON object merged into the LLM request body (user keys win). DeepSeek base URLs get `{"thinking":{"type":"enabled"},"reasoning_effort":"low"}` automatically (see Notes); override to disable thinking (`{"thinking":{"type":"disabled"}}`) or raise the effort. Retried once without it if the provider rejects it with 400. |
 | `exclude` | no | built-ins | Extra glob excludes (comma/newline separated) |
 | `max_files` | no | `40` | Files per review run |
 | `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file patch cap) |
@@ -192,12 +192,12 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
 
 ## Notes & limitations
 
-- **Reasoning models** (e.g. `deepseek-v4-flash`): they can spend their
-  whole token budget on `reasoning_content` and return `content: ""` with
-  `finish_reason: length` - i.e. no review at all. Two failure modes, both
-  measured against the DeepSeek API on a ~14k-char diff (5 trials per config):
-  - **`response_format: json_object` amplifies the burn while thinking is
-    enabled** - but it is harmless once thinking is disabled, so the default
+- **Reasoning models**: they can spend their whole token budget on
+  `reasoning_content` and return `content: ""` with `finish_reason: length`
+  - i.e. no review at all. Measurements against the previous DeepSeek v4-flash
+  on a ~14k-char diff (5 trials per config):
+  - **`response_format: json_object` amplified the burn while thinking was
+    enabled** - but it is harmless once thinking is controlled, so the default
     `auto` is fine. (The action also detects empty completions and retries
     the same prompt without `response_format` before re-asking.)
   - **Raising `max_tokens` is a threshold, not a dial.** Reasoning consumed
@@ -205,23 +205,26 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
     cleared it (~2/3 usable, ~16× slower, ~17× tokens, *and fewer findings*
     than thinking disabled - median 3 vs 8). Reasoning appetite scales with
     diff size, so larger diffs silently break again at any fixed budget.
-  - **Recommended - and automatic for DeepSeek**: thinking should be disabled
-    for reviews. The action auto-applies `thinking: {"type": "disabled"}`
-    (via `extra_body`) whenever `api_base_url` points at `api.deepseek.com`
-    and you have not set `extra_body` yourself - DeepSeek's API defaults
-    thinking to **enabled** (documented at api-docs.deepseek.com), which is
-    what burned the budget. Measured with thinking disabled: ~10s per call
-    (vs 60-165s), valid JSON on every trial, more findings. `response_format`
-    can stay at its `auto` default - `json_object` works fine once thinking
-    is off.
-  - Other providers with reasoning models: set
-    `extra_body: '{"thinking":{"type":"disabled"}}'` (DeepSeek-style) or
-    `extra_body: '{"reasoning_effort":"low"}'` yourself.
-  - **`reasoning_effort: "low"` is not recommended**: it reported the fewest
-    findings of any config (median 2, one trial zero) - reduced reasoning
-    makes the model hedge ("can't be sure without more context") and suppress
-    real issues. Worst of both worlds: slower than thinking disabled, far
-    fewer findings than either.
+  - **`reasoning_effort: "low"` measured poorly on v4-flash**: it reported the
+    fewest findings of any config (median 2, one trial zero) - reduced
+    reasoning made the model hedge ("can't be sure without more context") and
+    suppress real issues.
+- **DeepSeek default: thinking ON at low effort (automatic).** DeepSeek's API
+  defaults thinking to **enabled** (documented at api-docs.deepseek.com),
+  which is what made v4-flash burn its budget - so this action used to
+  auto-apply `thinking: {"type": "disabled"}`. DeepSeek-V4.1-Flash (model
+  `deepseek-flash`; the retired `deepseek-v4-flash` name is routed to it)
+  added a reasoning-effort control and claims improved reasoning efficiency,
+  so the action now auto-applies `{"thinking":{"type":"enabled"},"reasoning_effort":"low"}`
+  (via `extra_body`) whenever `api_base_url` points at `api.deepseek.com`
+  and you have not set `extra_body` yourself. This re-enables thinking while
+  bounding its cost; if a run still returns empty content, drop back with
+  `extra_body: '{"thinking":{"type":"disabled"}}'` (measured on v4-flash:
+  ~10s per call vs 60-165s, valid JSON on every trial, more findings). An
+  explicit `extra_body` always wins - including `{}` (send nothing).
+  - Other providers with reasoning models: set `extra_body` yourself, e.g.
+    `'{"thinking":{"type":"disabled"}}'` (DeepSeek-style) or
+    `'{"reasoning_effort":"low"}'`.
 - **Repo context**: the LLM prompt includes repository metadata fetched from
   the GitHub API — `owner/repo`, **visibility (public/private)**, description,
   default branch, primary language, and fork/archived flags — so the model can

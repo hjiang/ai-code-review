@@ -120,7 +120,7 @@ export async function callLLM(cfg: LLMConfig, messages: LLMMessage[]): Promise<u
     } catch (err) {
       if (!(err instanceof EmptyCompletionError)) throw err;
       if (jsonMode === 'auto' && cfg.provider === 'openai' && !retriedWithoutFormat) {
-        // Reasoning models (e.g. deepseek-v4-flash) can burn the whole token
+        // Reasoning models (e.g. deepseek-flash) can burn the whole token
         // budget on reasoning when `response_format: json_object` is sent,
         // returning empty content with finish_reason=length. Retry the same
         // prompt once WITHOUT response_format before re-asking — the provider

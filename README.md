@@ -153,8 +153,8 @@ Anthropic adapter; everything else uses the OpenAI adapter. Override with the
 | `provider` | no | `auto` | `openai` \| `anthropic` \| `auto` |
 | `max_tokens` | no | `8192` | Completion budget |
 | `temperature` | no | `0.2` | |
-| `response_format` | no | `auto` | `auto` \| `off`. `auto` sends `response_format: json_object` and auto-retries without it on an empty/rejected completion; `off` never sends it. with `json_object` they can burn the whole token budget on reasoning and return empty content; the action also auto-retries without it in that case, so `auto` stays the recommended default.
-| `extra_body` | no | - | Optional JSON object merged into the LLM request body (user keys win). DeepSeek base URLs get `{"thinking":{"type":"enabled"},"reasoning_effort":"low"}` automatically (see Notes); override to disable thinking (`{"thinking":{"type":"disabled"}}`) or raise the effort. Retried once without it if the provider rejects it with 400. |
+| `response_format` | no | `auto` | `auto` \| `off`. `auto` sends `response_format: json_object` and auto-retries without it on an empty/rejected completion; `off` never sends it. Reasoning models can burn the whole token budget on reasoning with `json_object` and return empty content; the action auto-retries once without `response_format` in that case, so `auto` stays the recommended default.
+| `extra_body` | no | - | Optional JSON object merged into the LLM request body (user keys win). DeepSeek V4.1-Flash models (`deepseek-flash`, or the retired `deepseek-v4-flash` alias) get `{"thinking":{"type":"enabled"},"reasoning_effort":"low"}` automatically (see Notes); override to disable thinking (`{"thinking":{"type":"disabled"}}`) or raise the effort. Retried once without it if the provider rejects it with 400. |
 | `exclude` | no | built-ins | Extra glob excludes (comma/newline separated) |
 | `max_files` | no | `40` | Files per review run |
 | `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file patch cap) |
@@ -216,8 +216,11 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
   `deepseek-flash`; the retired `deepseek-v4-flash` name is routed to it)
   added a reasoning-effort control and claims improved reasoning efficiency,
   so the action now auto-applies `{"thinking":{"type":"enabled"},"reasoning_effort":"low"}`
-  (via `extra_body`) whenever `api_base_url` points at `api.deepseek.com`
-  and you have not set `extra_body` yourself. This re-enables thinking while
+  (via `extra_body`) whenever `api_base_url` points at `api.deepseek.com`, the
+  configured model is V4.1-Flash (`deepseek-flash`, or the retired
+  `deepseek-v4-flash` alias - `deepseek-chat` and other models are left
+  untouched), and you have not set `extra_body` yourself. This re-enables
+  thinking while
   bounding its cost; if a run still returns empty content, drop back with
   `extra_body: '{"thinking":{"type":"disabled"}}'` (measured on v4-flash:
   ~10s per call vs 60-165s, valid JSON on every trial, more findings). An

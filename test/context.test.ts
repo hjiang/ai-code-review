@@ -90,10 +90,30 @@ describe('loadConfig', () => {
     // reasoning efficiency, the action instead pins thinking ON with a low
     // effort so reviews get reasoning benefits without the budget burn.
     for (const base of ['https://api.deepseek.com', 'https://api.deepseek.com/v1']) {
-      expect(loadConfig(reader({ api_base_url: base })).extraBody).toEqual({
+      expect(
+        loadConfig(reader({ api_base_url: base, model: 'deepseek-flash' })).extraBody
+      ).toEqual({
         thinking: { type: 'enabled' },
         reasoning_effort: 'low'
       });
+    }
+  });
+
+  it('gates the DeepSeek thinking default to flash models (regression: deepseek-chat)', () => {
+    // thinking/reasoning_effort are V4.1-Flash controls; deepseek-chat can
+    // reject them, which would force the compatibility retry in openai.ts on
+    // every call (a wasted request + added latency/rate-limit cost).
+    expect(
+      loadConfig(
+        reader({ api_base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' })
+      ).extraBody
+    ).toEqual({});
+    // The retired deepseek-v4-flash alias is routed to V4.1-Flash, so it keeps
+    // the default; dated flash variants match too.
+    for (const model of ['deepseek-v4-flash', 'deepseek-flash-1212']) {
+      expect(
+        loadConfig(reader({ api_base_url: 'https://api.deepseek.com/v1', model })).extraBody
+      ).toEqual({ thinking: { type: 'enabled' }, reasoning_effort: 'low' });
     }
   });
 

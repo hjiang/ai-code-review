@@ -35,7 +35,7 @@ inputs:
     default: 'auto'
     required: false
   extra_body:
-    description: 'Optional JSON object merged into the LLM request body (user keys win). E.g. deepseek reasoning models: {"thinking":{"type":"disabled"}} or {"reasoning_effort":"low"}. Retried once without it if the provider rejects it with 400.'
+    description: 'Optional JSON object merged into the LLM request body (user keys win). DeepSeek base URLs default to {"thinking":{"type":"enabled"},"reasoning_effort":"low"}; override e.g. with {"thinking":{"type":"disabled"}}. Retried once without it if the provider rejects it with 400.'
     default: ''
     required: false
   exclude:

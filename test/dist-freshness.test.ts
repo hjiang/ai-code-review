@@ -28,4 +28,12 @@ describe('dist freshness', () => {
     // first make sure dist/ is not simply stale (npm run build).
     expect(dist).not.toContain('.exec(text)');
   });
+
+  it('contains the compiled DeepSeek auto-applied extra_body default', () => {
+    // Unique to the current src/context.ts DeepSeek branch (d9cebed): when
+    // api_base_url points at api.deepseek.com and the user has not set
+    // extra_body, thinking is pinned ON at low effort instead of disabled.
+    expect(dist).toContain("reasoning_effort: 'low'");
+    expect(dist).toContain("thinking: { type: 'enabled' }");
+  });
 });

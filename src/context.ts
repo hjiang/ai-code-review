@@ -79,6 +79,21 @@ function numInput(
 const intInput = (reader: InputReader, name: string, def: number, min = 1) =>
   numInput(reader, name, def, (s) => parseInt(s, 10), min);
 
+/**
+ * Strict non-negative integer input. Unlike `intInput`, rejects values that
+ * merely truncate to an integer ("0.5" → 0, "-0.5" → -0, "1e3" → 1): for
+ * `timeout`, truncation to 0 would silently mean "uncapped" — the opposite of
+ * the requested cap.
+ */
+function strictIntInput(reader: InputReader, name: string, def: number): number {
+  const raw = reader.getInput(name).trim();
+  if (!raw) return def;
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`invalid input "${name}": "${raw}" is not a non-negative integer`);
+  }
+  return Number(raw);
+}
+
 /** Split comma/newline separated input into trimmed non-empty patterns. */
 export function splitPatterns(value: string): string[] {
   return value
@@ -158,7 +173,7 @@ export function loadConfig(reader: InputReader): ActionConfig {
     maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
     // 0 is valid: no client-side deadline (streaming + the idle-stall guard
     // keep uncapped requests safe; provider limits still apply).
-    timeout: intInput(reader, 'timeout', 300, 0),
+    timeout: strictIntInput(reader, 'timeout', 300),
     reviewDrafts: toBool(reader.getInput('review_drafts')),
     commentTrigger: reader.getInput('comment_trigger') || '/review',
     failOnError: toBool(reader.getInput('fail_on_error'))

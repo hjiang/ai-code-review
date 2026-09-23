@@ -39,6 +39,14 @@ function thinkingDelta(thinking: string, index = 0): SSEEvent {
   };
 }
 
+/** Plain JSON (non-SSE) response, e.g. a gateway ignoring stream:true. */
+function resp(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' }
+  });
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -221,5 +229,83 @@ describe('anthropicChat — SSE streaming', () => {
     await anthropicChat(cfg, userMsg, 0);
     expect(timeoutSpy).not.toHaveBeenCalled();
     expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBeUndefined();
+  });
+});
+
+describe('anthropicChat — robustness', () => {
+  it('falls back to a JSON (non-SSE) completion when the endpoint ignores stream:true', async () => {
+    const logs: string[] = [];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(resp(200, { content: [{ type: 'text', text: '{"ok":1}' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await callLLM({ ...cfg, log: (m) => logs.push(m) }, userMsg);
+    expect(result).toEqual({ ok: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(logs.join('\n')).toMatch(/not SSE/i);
+  });
+
+  it('skips a malformed content_block_delta payload instead of failing the request', async () => {
+    // A truncated line (dropped connection, re-framing proxy) must not discard
+    // an otherwise-usable stream.
+    const events: SSEEvent[] = [
+      { event: 'message_start', data: '{"type":"message_start"}' },
+      { event: 'content_block_delta', data: '{"type":"content_block_delta","delta":{"type":"text_del' },
+      textDelta('{"ok":'),
+      textDelta('1}'),
+      { event: 'message_stop', data: '{"type":"message_stop"}' }
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(sseResponse([sseWire(events)]));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(callLLM(cfg, userMsg)).resolves.toEqual({ ok: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no whole-request retry
+  });
+
+  it('logs stop_reason and thinking presence on empty completions', async () => {
+    const logs: string[] = [];
+    const events: SSEEvent[] = [
+      { event: 'message_start', data: '{"type":"message_start"}' },
+      thinkingDelta('pondering the diff'),
+      { event: 'message_delta', data: '{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}' },
+      { event: 'message_stop', data: '{"type":"message_stop"}' }
+    ];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(sseResponse([sseWire(events)]))
+      .mockResolvedValueOnce(anthropicSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await callLLM({ ...cfg, log: (m) => logs.push(m) }, userMsg);
+    expect(logs.join('\n')).toContain('stop_reason=max_tokens');
+    expect(logs.join('\n')).toContain('thinking=yes');
+  });
+
+  it('retries once without extra_body when the provider rejects it with 400', async () => {
+    const logs: string[] = [];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        resp(400, {
+          error: {
+            type: 'invalid_request_error',
+            message: 'temperature may only be set to 1 when thinking is enabled'
+          }
+        })
+      )
+      .mockResolvedValueOnce(anthropicSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await callLLM(
+      {
+        ...cfg,
+        extraBody: { thinking: { type: 'enabled', budget_tokens: 2048 } },
+        log: (m) => logs.push(m)
+      },
+      userMsg
+    );
+    expect(out).toEqual({ ok: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const retry = jsonBody(fetchMock.mock.calls[1][1] as RequestInit);
+    expect(retry.thinking).toBeUndefined(); // rejected param dropped
+    expect(retry.temperature).toBe(0.2); // base fields retained
+    expect(logs.join('\n')).toMatch(/extra_body/i);
   });
 });

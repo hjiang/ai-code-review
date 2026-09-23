@@ -348,6 +348,46 @@ describe('callLLM — timeout budget', () => {
       expect(t).toBeLessThanOrEqual(2 ** 31 - 1);
     }
   });
+
+  it('shares one deadline across compat/re-ask rounds (no fresh budget per round)', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        await sleep(290_000); // consume 290s of the 300s budget
+        return openAiOk('not json'); // parse failure → JSON re-ask round
+      })
+      .mockResolvedValueOnce(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = callLLM({ ...baseCfg, timeoutMs: 300_000 }, [{ role: 'user', content: 'hi' }]);
+    const done = expect(promise).resolves.toEqual({ ok: 1 });
+    await vi.advanceTimersByTimeAsync(290_000);
+    await done;
+    const timeouts = timeoutSpy.mock.calls.map((c) => c[0] as number);
+    expect(timeouts).toHaveLength(2);
+    // The re-ask round gets the leftover budget, not a fresh 300s.
+    expect(timeouts[1]).toBeLessThanOrEqual(10_000);
+    vi.useRealTimers();
+  });
+
+  it('reports a hard-deadline abort as the deadline error, without retrying', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(
+        new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const done = expect(callLLM(baseCfg, [{ role: 'user', content: 'hi' }])).rejects.toThrow(
+      /deadline exceeded/i
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    await done;
+    expect(fetchMock).toHaveBeenCalledTimes(1); // a deadline abort is not retried
+    vi.useRealTimers();
+  });
 });
 
 describe('callLLM — JSON re-ask', () => {

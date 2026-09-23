@@ -31764,6 +31764,11 @@ class EmptyCompletionError extends Error {
  *   `:`) are dropped. A final event without a trailing blank line is flushed
  *   when the stream closes.
  * - Provider-agnostic: no `[DONE]` or event-name special casing here.
+ *
+ * Caveat: consume the iterator to completion or break at a yield point.
+ * Abandoning it (`gen.return()`) while a read is pending can surface a
+ * `StreamStalledError` as a process-level uncaught exception instead of a
+ * rejection. Current adapters only exit at yield points, so this is latent.
  */
 /**
  * Abort if no bytes arrive for this long, so an uncapped request cannot hang
@@ -31927,6 +31932,20 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
     if (!res.ok) {
         throw new HttpError(res.status, (errorText ?? (await res.text())).slice(0, 500));
     }
+    if (!(res.headers.get('content-type') ?? '').includes('text/event-stream')) {
+        // The endpoint answered with a plain JSON completion: it ignored
+        // `stream: true`, or the user set extra_body {"stream": false} (a
+        // documented escape hatch). Handle it rather than misreporting an empty
+        // stream. Note: long-thinking requests lose streaming's idle protection.
+        cfg.log?.('llm: openai response is not SSE (endpoint ignored stream:true); reading the JSON completion');
+        const data = (await res.json());
+        const choice = data.choices?.[0];
+        const content = choice?.message?.content ?? choice?.text;
+        if (typeof content !== 'string' || content.trim().length === 0) {
+            throw new EmptyCompletionError('provider returned empty completion content');
+        }
+        return content;
+    }
     // Accumulate the streamed reply. `finish_reason` keeps the first non-null
     // value: providers send it once, on the chunk that ends the stream, so the
     // first observation is the reason the content stopped — robust even when a
@@ -31945,6 +31964,12 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
         }
         catch {
             continue; // keep-alive or malformed data line; judge by what accumulated
+        }
+        if (chunk.error !== undefined) {
+            // Mid-stream provider failure on an HTTP 200 (e.g. OpenRouter sends
+            // `data: {"error": {...}}`). Plain Error = retryable, and the payload
+            // reaches the retry log instead of masquerading as an empty completion.
+            throw new Error(`openai stream error: ${ev.data}`);
         }
         const choice = chunk.choices?.[0];
         const content = choice?.delta?.content;
@@ -32014,34 +32039,81 @@ async function anthropicChat(cfg, messages, timeoutMs) {
         body.system = system;
     if (cfg.extraBody)
         Object.assign(body, cfg.extraBody); // user keys win
-    const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'x-api-key': cfg.apiKey,
-            'anthropic-version': ANTHROPIC_VERSION,
-            'content-type': 'application/json'
-        },
-        body: JSON.stringify(body),
-        // Hard total-deadline abort. `timeoutMs 0` = uncapped: no AbortSignal, so
-        // the provider may think arbitrarily long (stream bytes keep the request
-        // alive). Node throws RangeError for timeouts >= 2^31 ms and clamps larger
-        // values to a 1 ms abort, so clamp here.
-        signal: timeoutMs > 0 ? AbortSignal.timeout(Math.min(timeoutMs, 2 ** 31 - 1)) : undefined
-    });
+    const headers = {
+        'x-api-key': cfg.apiKey,
+        'anthropic-version': ANTHROPIC_VERSION,
+        'content-type': 'application/json'
+    };
+    // Hard total-deadline abort, computed once for all attempts. `timeoutMs 0` =
+    // uncapped: no AbortSignal, so the provider may think arbitrarily long
+    // (stream bytes keep the request alive). Node throws RangeError for
+    // non-finite delays and clamps values >= 2^31 ms to a 1 ms abort, so clamp.
+    const signal = timeoutMs > 0 ? AbortSignal.timeout(Math.min(timeoutMs, 2 ** 31 - 1)) : undefined;
+    let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+    if (!res.ok && res.status === 400 && cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
+        // The provider rejected a user-supplied extra param (e.g. thinking with a
+        // temperature other than 1); retry once without it, mirroring openai.ts.
+        cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
+        for (const k of Object.keys(cfg.extraBody))
+            delete body[k];
+        // JSON.stringify is recomputed: extra_body keys are gone from `body`.
+        res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+    }
     if (!res.ok) {
         throw new HttpError(res.status, (await res.text()).slice(0, 500));
+    }
+    if (!(res.headers.get('content-type') ?? '').includes('text/event-stream')) {
+        // The endpoint answered with a plain JSON completion: it ignored
+        // `stream: true`, or the user set extra_body {"stream": false} (a
+        // documented escape hatch). Handle it rather than misreporting an empty
+        // stream. Note: long-thinking requests lose streaming's idle protection.
+        cfg.log?.('llm: anthropic response is not SSE (endpoint ignored stream:true); reading the JSON completion');
+        const data = (await res.json());
+        const text = data.content?.find((b) => b.type === 'text')?.text;
+        if (typeof text !== 'string' || text.trim().length === 0) {
+            throw new EmptyCompletionError('provider returned empty completion content');
+        }
+        return text;
     }
     if (!res.body) {
         throw new Error('anthropic stream error: 200 response has no body');
     }
     let text = '';
     let events = 0;
+    let stopReason;
+    let thinkingSeen = false;
     for await (const ev of parseSSE(res.body)) {
         events++;
         if (ev.event === 'content_block_delta') {
-            const delta = JSON.parse(ev.data).delta;
+            let payload;
+            try {
+                payload = JSON.parse(ev.data);
+            }
+            catch {
+                continue; // malformed/truncated line; judge by what accumulated
+            }
+            const delta = payload.delta;
             if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
                 text += delta.text;
+            }
+            else if (delta?.type === 'thinking_delta' &&
+                typeof delta.thinking === 'string' &&
+                delta.thinking.length > 0) {
+                thinkingSeen = true;
+            }
+        }
+        else if (ev.event === 'message_delta') {
+            // Carries the stop reason (e.g. `max_tokens` when a thinking budget ate
+            // the allowance) — the key clue when a completion ends up empty.
+            try {
+                const payload = JSON.parse(ev.data);
+                const reason = payload.delta?.stop_reason;
+                if (stopReason === undefined && typeof reason === 'string' && reason.length > 0) {
+                    stopReason = reason;
+                }
+            }
+            catch {
+                continue; // malformed line; the diagnostic degrades to stop_reason=none
             }
         }
         else if (ev.event === 'error') {
@@ -32056,7 +32128,7 @@ async function anthropicChat(cfg, messages, timeoutMs) {
     if (text.trim().length === 0) {
         // See the streaming contract: empty completions are a provider-side
         // failure mode; log a diagnostic and let the caller re-ask.
-        cfg.log?.(`llm: anthropic extraction failed (empty completion); events=${events}`);
+        cfg.log?.(`llm: anthropic extraction failed (empty completion); events=${events} stop_reason=${stopReason ?? 'none'} thinking=${thinkingSeen ? 'yes' : 'no'}`);
         throw new EmptyCompletionError('provider returned empty completion content');
     }
     return text;
@@ -32232,30 +32304,29 @@ function isRetryable(err) {
 }
 /**
  * One HTTP round-trip with backoff retries; returns the raw reply text.
- * A single deadline is computed up front and each attempt receives the
- * remaining budget, so the total request (all attempts + backoff) cannot
- * exceed `cfg.timeoutMs` (default 5 minutes; `0` or any non-finite value =
- * uncapped — attempts run with no AbortSignal, letting providers reason for
- * arbitrarily long; non-finite budgets must be uncapped because
- * `AbortSignal.timeout` throws RangeError for Infinity/NaN).
+ * `deadline` is an absolute epoch-ms timestamp owned by `callLLM` (Infinity =
+ * uncapped), so every attempt AND every retry round — the response_format
+ * compat retry and the JSON re-ask — shares one budget and `timeoutMs` bounds
+ * the whole `callLLM` wall clock.
  */
-async function requestWithRetry(cfg, messages, jsonMode) {
-    const totalMs = cfg.timeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
-    // `0` and non-finite budgets are both uncapped: AbortSignal.timeout throws
-    // RangeError for Infinity/NaN, which would burn every retry before failing.
-    const uncapped = totalMs === 0 || !Number.isFinite(totalMs);
-    const deadline = uncapped ? Infinity : Date.now() + totalMs;
+async function requestWithRetry(cfg, messages, jsonMode, deadline) {
+    const uncapped = !Number.isFinite(deadline);
     let lastErr;
+    let deadlineAborted = false;
     for (let attempt = 0; attempt < MAX_HTTP_ATTEMPTS; attempt++) {
         const remaining = uncapped ? 0 : deadline - Date.now();
         if (!uncapped && remaining <= 0)
-            break; // total deadline exhausted; give up
+            break; // deadline exhausted; give up
         try {
             return await chatOnce(cfg, messages, jsonMode, remaining);
         }
         catch (err) {
             lastErr = err;
-            if (isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {
+            // A deadline abort (our AbortSignal fired) is not transient: no budget
+            // remains, so retrying is pointless and the log must not claim it will.
+            deadlineAborted =
+                err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+            if (!deadlineAborted && isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {
                 // Log transient failures (incl. empty completions) so retries are
                 // visible in the workflow log; the reply body is already omitted from
                 // the message to keep it one-line and secret-free.
@@ -32271,11 +32342,12 @@ async function requestWithRetry(cfg, messages, jsonMode) {
             break;
         }
     }
-    if (lastErr === undefined) {
-        // The shared deadline was exhausted before any attempt could start (e.g.
-        // the clock jumped past the deadline between computation and the first
-        // attempt); surface a clear timeout instead of `LLM request failed: undefined`.
-        throw new LLMError(`LLM deadline exceeded after ${totalMs}ms`);
+    if (lastErr === undefined || deadlineAborted) {
+        // Either the shared budget was spent before this attempt could start (an
+        // earlier round consumed it, or the clock jumped past the deadline), or a
+        // per-attempt abort fired because the deadline was reached: both are the
+        // deadline, so surface it instead of a raw TimeoutError.
+        throw new LLMError(`LLM deadline exceeded after ${cfg.timeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS}ms`);
     }
     if (lastErr instanceof HttpError) {
         throw new LLMError(`LLM HTTP ${lastErr.status}: ${lastErr.message}`);
@@ -32295,6 +32367,13 @@ async function requestWithRetry(cfg, messages, jsonMode) {
 async function callLLM(cfg, messages) {
     const jsonMode = cfg.jsonMode ?? 'auto';
     const log = cfg.log ?? (() => { });
+    const totalMs = cfg.timeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
+    // `0` and non-finite budgets are uncapped (`AbortSignal.timeout` throws
+    // RangeError for Infinity/NaN, so a non-finite budget must never produce a
+    // signal). Computed once so EVERY round of this logical call — the HTTP
+    // attempts, the response_format compat retry, and the JSON re-ask — shares
+    // one budget: `timeoutMs` bounds the whole call's wall clock.
+    const deadline = totalMs === 0 || !Number.isFinite(totalMs) ? Infinity : Date.now() + totalMs;
     let msgs = [...messages];
     const rawReplies = [];
     let retriedWithoutFormat = false;
@@ -32303,7 +32382,7 @@ async function callLLM(cfg, messages) {
         const effectiveMode = jsonMode === 'auto' && retriedWithoutFormat ? 'off' : jsonMode;
         let text;
         try {
-            text = await requestWithRetry(cfg, msgs, effectiveMode);
+            text = await requestWithRetry(cfg, msgs, effectiveMode, deadline);
         }
         catch (err) {
             if (!(err instanceof EmptyCompletionError))
@@ -32374,6 +32453,21 @@ function numInput(reader, name, def, parse, min) {
     return value;
 }
 const intInput = (reader, name, def, min = 1) => numInput(reader, name, def, (s) => parseInt(s, 10), min);
+/**
+ * Strict non-negative integer input. Unlike `intInput`, rejects values that
+ * merely truncate to an integer ("0.5" → 0, "-0.5" → -0, "1e3" → 1): for
+ * `timeout`, truncation to 0 would silently mean "uncapped" — the opposite of
+ * the requested cap.
+ */
+function strictIntInput(reader, name, def) {
+    const raw = reader.getInput(name).trim();
+    if (!raw)
+        return def;
+    if (!/^\d+$/.test(raw)) {
+        throw new Error(`invalid input "${name}": "${raw}" is not a non-negative integer`);
+    }
+    return Number(raw);
+}
 /** Split comma/newline separated input into trimmed non-empty patterns. */
 function splitPatterns(value) {
     return value
@@ -32452,7 +32546,7 @@ function loadConfig(reader) {
         maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
         // 0 is valid: no client-side deadline (streaming + the idle-stall guard
         // keep uncapped requests safe; provider limits still apply).
-        timeout: intInput(reader, 'timeout', 300, 0),
+        timeout: strictIntInput(reader, 'timeout', 300),
         reviewDrafts: toBool(reader.getInput('review_drafts')),
         commentTrigger: reader.getInput('comment_trigger') || '/review',
         failOnError: toBool(reader.getInput('fail_on_error'))

@@ -187,4 +187,42 @@ describe('openaiChat — SSE streaming', () => {
     await openaiChat({ ...baseCfg, extraBody: { stream: false } }, msgs, 'off', 1000);
     expect(jsonBody(fetch2.mock.calls[0][1]).stream).toBe(false);
   });
+
+  it('surfaces a mid-stream error envelope as a retryable failure, not an empty completion', async () => {
+    // Providers report mid-generation failures on an HTTP 200 as a regular
+    // `data: {"error": {...}}` event (OpenRouter documents this; the OpenAI SDK
+    // detects it by the presence of `error`).
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5); // exact 2s backoff
+    const logs: string[] = [];
+    const errorEvent: SSEEvent = {
+      event: '',
+      data: JSON.stringify({ error: { type: 'overloaded_error', message: 'Overloaded' } })
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(sseResponse([sseWire([errorEvent, { event: '', data: '[DONE]' }])]))
+      .mockResolvedValueOnce(openAiSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = callLLM({ ...baseCfg, log: (m) => logs.push(m) }, msgs);
+    const done = expect(promise).resolves.toEqual({ ok: 1 });
+    await vi.advanceTimersByTimeAsync(2000); // backoff before the retry
+    await done;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(logs.join('\n')).toContain('overloaded_error');
+  });
+
+  it('falls back to a JSON (non-SSE) completion when the endpoint ignores stream:true', async () => {
+    // extra_body {"stream": false} is a documented escape hatch, and gateways
+    // may ignore stream; both answer with a plain JSON completion body.
+    const logs: string[] = [];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(resp(200, { choices: [{ message: { content: '{"ok":1}' } }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await callLLM({ ...baseCfg, log: (m) => logs.push(m) }, msgs);
+    expect(result).toEqual({ ok: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(logs.join('\n')).toMatch(/not SSE/i);
+  });
 });

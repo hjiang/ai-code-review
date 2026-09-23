@@ -123,16 +123,19 @@ appear as separate reviews - the natural "multiple times per PR" behavior.
     the repository context block (visibility, description, default branch,
     primary language, fork/archived flags) fetched via `GET /repos/{o}/{r}`.
 - `callLLM(config, messages)` -> `unknown` (parsed JSON)
-  - Total deadline = `config.timeoutMs` ms, shared across all HTTP attempts
-    (each attempt gets the remaining budget; default 300000). `0` or any
-    non-finite value = uncapped: no hard abort signal. Adapters stream SSE,
-    so an uncapped request stays alive while bytes flow; `parseSSE` aborts a
-    stream that produces no bytes for 5 minutes (retryable stall), and the
-    hard abort signal is clamped to 2^31-1 ms (Node overflow behavior).
-  - Retries 429/5xx (backoff 2s/8s/32s). An empty completion (reasoning-model
-    budget burn) retries once without `response_format`, then falls through to
-    the re-ask path; on non-JSON response, re-asks once with a JSON nudge
-    appended; throws `LLMError` after 2 parse failures.
+  - Total deadline = `config.timeoutMs` ms, computed once per call and shared
+    by every HTTP attempt AND every round (the response_format compat retry
+    and the JSON re-ask), so it bounds the whole logical request's wall clock
+    (default 300000). `0` or any non-finite value = uncapped: no hard abort
+    signal. Adapters stream SSE, so an uncapped request stays alive while bytes
+    flow; `parseSSE` aborts a stream that produces no bytes for 5 minutes
+    (retryable stall), and the hard abort signal is clamped to 2^31-1 ms (Node
+    overflow behavior).
+  - Retries 429/5xx (backoff 2s/8s; 3 attempts total, so the 32s table entry
+    in `util/retry.ts` is unreachable here). An empty completion
+    (reasoning-model budget burn) retries once without `response_format`, then
+    falls through to the re-ask path; on non-JSON response, re-asks once with a
+    JSON nudge appended; throws `LLMError` after 2 parse failures.
 - `validateFindings(findings, prFiles)` -> `ValidFinding[]`
   - Post: every returned finding has `path ∈ diff`, `line ∈ newLines(path)`,
     severity ∈ enum, non-empty comment. Invalid ones are logged and dropped.

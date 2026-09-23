@@ -15,10 +15,22 @@ import type { LLMConfig, LLMMessage } from './types.js';
 
 const ANTHROPIC_VERSION = '2023-06-01';
 
-/** `delta` payload of a `content_block_delta` event (only `text_delta` is used). */
+/** `delta` payload of a `content_block_delta` / `message_delta` event. */
 interface AnthropicDelta {
   type?: string;
   text?: string;
+  thinking?: string;
+  stop_reason?: string;
+}
+
+/** Parsed `data:` payload of one Anthropic streaming event. */
+interface AnthropicEventPayload {
+  delta?: AnthropicDelta;
+}
+
+/** Non-streaming Messages API body (fallback when the endpoint ignores stream). */
+interface AnthropicJsonResponse {
+  content?: { type?: string; text?: string }[];
 }
 
 /**
@@ -57,22 +69,44 @@ export async function anthropicChat(
   if (system) body.system = system;
   if (cfg.extraBody) Object.assign(body, cfg.extraBody); // user keys win
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'x-api-key': cfg.apiKey,
-      'anthropic-version': ANTHROPIC_VERSION,
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify(body),
-    // Hard total-deadline abort. `timeoutMs 0` = uncapped: no AbortSignal, so
-    // the provider may think arbitrarily long (stream bytes keep the request
-    // alive). Node throws RangeError for timeouts >= 2^31 ms and clamps larger
-    // values to a 1 ms abort, so clamp here.
-    signal: timeoutMs > 0 ? AbortSignal.timeout(Math.min(timeoutMs, 2 ** 31 - 1)) : undefined
-  });
+  const headers = {
+    'x-api-key': cfg.apiKey,
+    'anthropic-version': ANTHROPIC_VERSION,
+    'content-type': 'application/json'
+  };
+  // Hard total-deadline abort, computed once for all attempts. `timeoutMs 0` =
+  // uncapped: no AbortSignal, so the provider may think arbitrarily long
+  // (stream bytes keep the request alive). Node throws RangeError for
+  // non-finite delays and clamps values >= 2^31 ms to a 1 ms abort, so clamp.
+  const signal =
+    timeoutMs > 0 ? AbortSignal.timeout(Math.min(timeoutMs, 2 ** 31 - 1)) : undefined;
+  let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  if (!res.ok && res.status === 400 && cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
+    // The provider rejected a user-supplied extra param (e.g. thinking with a
+    // temperature other than 1); retry once without it, mirroring openai.ts.
+    cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
+    for (const k of Object.keys(cfg.extraBody)) delete body[k];
+    // JSON.stringify is recomputed: extra_body keys are gone from `body`.
+    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  }
   if (!res.ok) {
     throw new HttpError(res.status, (await res.text()).slice(0, 500));
+  }
+
+  if (!(res.headers.get('content-type') ?? '').includes('text/event-stream')) {
+    // The endpoint answered with a plain JSON completion: it ignored
+    // `stream: true`, or the user set extra_body {"stream": false} (a
+    // documented escape hatch). Handle it rather than misreporting an empty
+    // stream. Note: long-thinking requests lose streaming's idle protection.
+    cfg.log?.(
+      'llm: anthropic response is not SSE (endpoint ignored stream:true); reading the JSON completion'
+    );
+    const data = (await res.json()) as AnthropicJsonResponse;
+    const text = data.content?.find((b) => b.type === 'text')?.text;
+    if (typeof text !== 'string' || text.trim().length === 0) {
+      throw new EmptyCompletionError('provider returned empty completion content');
+    }
+    return text;
   }
   if (!res.body) {
     throw new Error('anthropic stream error: 200 response has no body');
@@ -80,12 +114,38 @@ export async function anthropicChat(
 
   let text = '';
   let events = 0;
+  let stopReason: string | undefined;
+  let thinkingSeen = false;
   for await (const ev of parseSSE(res.body)) {
     events++;
     if (ev.event === 'content_block_delta') {
-      const delta = (JSON.parse(ev.data) as { delta?: AnthropicDelta }).delta;
+      let payload: AnthropicEventPayload;
+      try {
+        payload = JSON.parse(ev.data) as AnthropicEventPayload;
+      } catch {
+        continue; // malformed/truncated line; judge by what accumulated
+      }
+      const delta = payload.delta;
       if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
         text += delta.text;
+      } else if (
+        delta?.type === 'thinking_delta' &&
+        typeof delta.thinking === 'string' &&
+        delta.thinking.length > 0
+      ) {
+        thinkingSeen = true;
+      }
+    } else if (ev.event === 'message_delta') {
+      // Carries the stop reason (e.g. `max_tokens` when a thinking budget ate
+      // the allowance) — the key clue when a completion ends up empty.
+      try {
+        const payload = JSON.parse(ev.data) as AnthropicEventPayload;
+        const reason = payload.delta?.stop_reason;
+        if (stopReason === undefined && typeof reason === 'string' && reason.length > 0) {
+          stopReason = reason;
+        }
+      } catch {
+        continue; // malformed line; the diagnostic degrades to stop_reason=none
       }
     } else if (ev.event === 'error') {
       // Mid-stream failure on an HTTP 200 (e.g. overloaded_error). Plain
@@ -99,7 +159,9 @@ export async function anthropicChat(
   if (text.trim().length === 0) {
     // See the streaming contract: empty completions are a provider-side
     // failure mode; log a diagnostic and let the caller re-ask.
-    cfg.log?.(`llm: anthropic extraction failed (empty completion); events=${events}`);
+    cfg.log?.(
+      `llm: anthropic extraction failed (empty completion); events=${events} stop_reason=${stopReason ?? 'none'} thinking=${thinkingSeen ? 'yes' : 'no'}`
+    );
     throw new EmptyCompletionError('provider returned empty completion content');
   }
   return text;

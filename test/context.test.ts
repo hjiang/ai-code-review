@@ -71,6 +71,14 @@ describe('loadConfig', () => {
     expect(() => loadConfig(reader({ timeout: 'soon' }))).toThrow('invalid input "timeout"');
   });
 
+  it('rejects timeout values that truncate to 0 (silent uncap)', () => {
+    // parseInt truncation made "0.5" → 0 (uncapped!) and "-0.5" → -0 (not < 0),
+    // i.e. the opposite of the requested cap; only a literal integer is valid.
+    expect(() => loadConfig(reader({ timeout: '0.5' }))).toThrow('invalid input "timeout"');
+    expect(() => loadConfig(reader({ timeout: '-0.5' }))).toThrow('invalid input "timeout"');
+    expect(() => loadConfig(reader({ timeout: '1e3' }))).toThrow('invalid input "timeout"');
+  });
+
   it('validates the mode value', () => {
     expect(() => loadConfig(reader({ mode: 'bogus' }))).toThrow(/mode/i);
     expect(loadConfig(reader({ mode: 'summary' })).mode).toBe('summary');

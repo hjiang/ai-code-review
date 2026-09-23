@@ -14,7 +14,8 @@ export interface LLMConfig {
   /** `auto`: send `response_format` and retry without it on 400; `off`: never. */
   jsonMode?: 'auto' | 'off';
   /**
-   * Total budget for one LLM request (all HTTP attempts + backoff), ms.
+   * Wall-clock budget for one logical LLM call (`callLLM`), ms: every HTTP
+   * attempt, the response_format compat retry, and the JSON re-ask share it.
    * Defaults to 5 minutes; `0` (or any non-finite value) removes the
    * client-side deadline. Responses stream (SSE) with a 5-minute no-bytes
    * stall detector, so uncapped requests support arbitrarily long thinking

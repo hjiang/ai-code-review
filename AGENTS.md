@@ -52,7 +52,7 @@ docs/                   # REQUIREMENTS.md, ARCHITECTURE.md, plans/
   must be verified against provider/external-service limits before landing —
   name the binding constraint explicitly (e.g. Anthropic cuts non-streaming
   requests at the ~10-minute class; long requests require streaming).
-- LLM requests stream via SSE (`src/llm/sse.ts`, idle-stall guard) — required
-  for requests longer than ~10 min; `timeout: 0` removes only our cap.
+- LLM requests stream via SSE (`src/llm/sse.ts`, idle-stall guard); `timeout: 0`
+  removes only our cap, not the provider's limit.
 - TDD: write failing test → implement → refactor, including for small fixes.
 - Plans live in `docs/plans/NNN-<name>.md`.

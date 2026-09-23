@@ -99,6 +99,23 @@ describe('parseSSE', () => {
     expect(events.map((e) => e.data)).toEqual(['one', 'two', 'three']);
     vi.useRealTimers();
   });
+  it('reassembles multi-byte UTF-8 split mid-codepoint across chunks', async () => {
+    const encoder = new TextEncoder();
+    const payload = JSON.stringify({ msg: '你好 🎉 café' });
+    const wire = `data: ${payload}\n\n`;
+    // Split INSIDE the emoji's 4-byte sequence, then again 2 bytes later.
+    const emojiByte = encoder.encode(wire.slice(0, wire.indexOf('🎉'))).length;
+    const bytes = encoder.encode(wire);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, emojiByte + 1));
+        controller.enqueue(bytes.slice(emojiByte + 1, emojiByte + 3));
+        controller.enqueue(bytes.slice(emojiByte + 3));
+        controller.close();
+      }
+    });
+    expect((await collect2(parseSSE(body))).map((e) => e.data)).toEqual([payload]);
+  });
 });
 
 /** Drain parseSSE events, capturing rejection for assertions. */

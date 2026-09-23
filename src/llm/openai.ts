@@ -19,6 +19,13 @@ interface OpenAIStreamChunk {
     delta?: { content?: unknown; reasoning_content?: unknown };
     finish_reason?: unknown;
   }[];
+  /** Mid-stream provider failure delivered on an HTTP 200 (e.g. OpenRouter). */
+  error?: unknown;
+}
+
+/** Non-streaming chat-completions body (fallback when the endpoint ignores stream). */
+interface OpenAIJsonResponse {
+  choices?: { message?: { content?: string }; text?: string }[];
 }
 
 function isResponseFormatError(status: number, body: string): boolean {
@@ -88,6 +95,23 @@ export async function openaiChat(
     throw new HttpError(res.status, (errorText ?? (await res.text())).slice(0, 500));
   }
 
+  if (!(res.headers.get('content-type') ?? '').includes('text/event-stream')) {
+    // The endpoint answered with a plain JSON completion: it ignored
+    // `stream: true`, or the user set extra_body {"stream": false} (a
+    // documented escape hatch). Handle it rather than misreporting an empty
+    // stream. Note: long-thinking requests lose streaming's idle protection.
+    cfg.log?.(
+      'llm: openai response is not SSE (endpoint ignored stream:true); reading the JSON completion'
+    );
+    const data = (await res.json()) as OpenAIJsonResponse;
+    const choice = data.choices?.[0];
+    const content = choice?.message?.content ?? choice?.text;
+    if (typeof content !== 'string' || content.trim().length === 0) {
+      throw new EmptyCompletionError('provider returned empty completion content');
+    }
+    return content;
+  }
+
   // Accumulate the streamed reply. `finish_reason` keeps the first non-null
   // value: providers send it once, on the chunk that ends the stream, so the
   // first observation is the reason the content stopped — robust even when a
@@ -104,6 +128,12 @@ export async function openaiChat(
       chunk = JSON.parse(ev.data) as OpenAIStreamChunk;
     } catch {
       continue; // keep-alive or malformed data line; judge by what accumulated
+    }
+    if (chunk.error !== undefined) {
+      // Mid-stream provider failure on an HTTP 200 (e.g. OpenRouter sends
+      // `data: {"error": {...}}`). Plain Error = retryable, and the payload
+      // reaches the retry log instead of masquerading as an empty completion.
+      throw new Error(`openai stream error: ${ev.data}`);
     }
     const choice = chunk.choices?.[0];
     const content = choice?.delta?.content;

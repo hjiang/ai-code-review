@@ -16,18 +16,46 @@ clock was the only missing knob.
 ## Design
 
 - New action input `timeout` (seconds, default `300` = previous behavior,
-  `0` valid = uncapped) → `ActionConfig.timeout` (`src/context.ts`, parsed
-  with `intInput(reader, 'timeout', 300, 0)`) → `LLMConfig.timeoutMs`
-  (`src/index.ts`, ×1000) → `requestWithRetry` shared deadline
-  (`src/llm/client.ts`).
-- Contract: `timeoutMs` is the TOTAL budget for one logical LLM request —
-  all HTTP attempts + backoff. Each attempt receives the remaining budget.
-  `timeoutMs: 0` computes `deadline = Infinity`: no break on exhausted
-  budget, backoff never clamped, and adapters receive remaining `0`, which
-  means "send no `AbortSignal`" (`timeoutMs > 0 ? AbortSignal.timeout(ms) :
-  undefined` in both `openai.ts` and `anthropic.ts`).
-- Retry semantics unchanged: 3 attempts, 2s/8s/32s backoff, 429/5xx/network
-  retryable. Only the deadline source changed.
+  `0` valid = uncapped) → `ActionConfig.timeout` (`src/context.ts`, parsed by
+  `strictIntInput` so "0.5"/"-0.5" cannot truncate to 0 = uncapped) →
+  `LLMConfig.timeoutMs` (`src/index.ts`, ×1000) → the shared deadline in
+  `src/llm/client.ts`.
+- Contract: `timeoutMs` is the wall-clock budget for one logical LLM call —
+  every HTTP attempt, the `response_format` compat retry, and the JSON re-ask.
+  `timeoutMs: 0` (or non-finite) computes `deadline = Infinity`: no break on
+  exhausted budget, backoff never clamped, and adapters receive remaining `0`,
+  which means "send no `AbortSignal`" (`timeoutMs > 0 ? AbortSignal.timeout(
+  min(ms, 2^31-1)) : undefined` in both `openai.ts` and `anthropic.ts`).
+- Retry semantics unchanged: 3 attempts, 2s/8s backoff (the 32s table entry is
+  unreachable at 3 attempts), 429/5xx/network retryable. Only the deadline
+  source changed.
+- The deadline is computed ONCE in `callLLM` and threaded into
+  `requestWithRetry`, so every round of one logical call — HTTP attempts, the
+  `response_format` compat retry, and the JSON re-ask — shares one budget:
+  `timeout` bounds the whole call's wall clock (review finding: a per-round
+  budget allowed up to 3x the configured cap). A hard-deadline abort is
+  classified non-retryable and surfaces as the deadline error.
+
+## Review round (branch review, 4 reviewers)
+
+- SSE parser: approve. Added the multi-byte-UTF-8 split test and documented
+  the iterator-abandonment caveat (latent; no consumer does it).
+- Adapters: request-changes → fixed. Mid-stream `{"error": ...}` envelopes are
+  now retryable failures (were silently discarded → misreported as empty
+  completions); a non-SSE 200 (endpoint ignoring `stream: true`, or the
+  documented `extra_body {"stream": false}` escape hatch) falls back to
+  reading the plain JSON completion instead of misreporting an empty stream;
+  Anthropic empty-completion logs now carry `stop_reason`/`thinking`;
+  malformed `content_block_delta` lines are skipped.
+- Timeout/config: fixed. The deadline is now computed once per `callLLM` (it
+  was per retry round, allowing up to 3x the configured cap); hard-deadline
+  aborts are non-retryable and surface as the deadline error instead of a
+  generic `TimeoutError`; `timeout` is parsed strictly so "0.5"/"-0.5" cannot
+  truncate to 0 (uncapped — the opposite of the intent).
+- Docs: fixed. Deadline scope corrected across all touchpoints; Anthropic
+  thinking guidance now names the `temperature: 1` requirement; the
+  `extra_body` 400-retry is implemented for Anthropic too (the claim was
+  OpenAI-only); backoff table corrected to 2s/8s; AGENTS.md bullet trimmed.
 
 ## Provider-side limit (verified) and resolution
 
@@ -81,9 +109,12 @@ request SSE (`stream: true`) and accumulate text deltas.
    adapters in three reviewed slices, each with red-first evidence: anthropic
    13/13 red → green, openai 8/8, plus client guards (non-finite uncapped,
    uncapped attempt-cap, 2^31 clamp).
-3. Final: `tsc --noEmit` clean; 235/235 tests across 20 files; coverage
-   98.25% lines / 92.78% branches (thresholds 90/80); `npm run build`
-   (committed `dist/`) + `test/dist-freshness.test.ts` green.
+3. Final: `tsc --noEmit` clean; 245/245 tests across 20 files; coverage
+   97.89% lines / 92.32% branches (thresholds 90/80); `npm run build`
+   (committed `dist/`) + `test/dist-freshness.test.ts` green. Live smoke
+   against api.deepseek.com re-run after the review round: real
+   `text/event-stream` response, reasoning deltas never leaked, uncapped
+   request carried no abort signal.
 4. Docs updated in the same change: `action.yml`, `README.md` inputs table,
    `REQUIREMENTS.md` FR-P5, `ARCHITECTURE.md` (layout + `callLLM` contract),
    `AGENTS.md` conventions, adapter/client JSDoc.

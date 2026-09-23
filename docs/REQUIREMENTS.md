@@ -64,11 +64,12 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
   always validate and re-ask once on parse failure; give up with a clear error
   after 2 attempts.
 - FR-P5: Retries on 429/5xx with exponential backoff (max 3), under a total
-  request deadline of `timeout` seconds (default 300). `timeout: 0` removes
-  the client-side cap (no abort signal) — responses stream (SSE), so this
-  permits arbitrarily long model thinking, bounded only by provider limits
-  and the job timeout. A stream producing no bytes for 5 minutes is treated
-  as stalled (retryable).
+  deadline of `timeout` seconds for the whole LLM call — shared by every HTTP
+  attempt, the `response_format` compat retry, and the JSON re-ask (default
+  300). `timeout: 0` removes the client-side cap (no abort signal) — responses
+  stream (SSE), so this permits arbitrarily long model thinking, bounded only
+  by provider limits and the job timeout. A stream producing no bytes for
+  5 minutes is treated as stalled (retryable).
 
 ## Inputs (action.yml)
 

@@ -10,6 +10,11 @@
  *   `:`) are dropped. A final event without a trailing blank line is flushed
  *   when the stream closes.
  * - Provider-agnostic: no `[DONE]` or event-name special casing here.
+ *
+ * Caveat: consume the iterator to completion or break at a yield point.
+ * Abandoning it (`gen.return()`) while a read is pending can surface a
+ * `StreamStalledError` as a process-level uncaught exception instead of a
+ * rejection. Current adapters only exit at yield points, so this is latent.
  */
 
 export interface SSEEvent {

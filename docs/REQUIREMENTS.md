@@ -63,8 +63,12 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
 - FR-P4: Strict JSON output: use native JSON mode / response tool if available;
   always validate and re-ask once on parse failure; give up with a clear error
   after 2 attempts.
-- FR-P5: Retries on 429/5xx with exponential backoff (max 3), 5-minute total
-  request timeout.
+- FR-P5: Retries on 429/5xx with exponential backoff (max 3), under a total
+  request deadline of `timeout` seconds (default 300). `timeout: 0` removes
+  the client-side cap (no abort signal) — responses stream (SSE), so this
+  permits arbitrarily long model thinking, bounded only by provider limits
+  and the job timeout. A stream producing no bytes for 5 minutes is treated
+  as stalled (retryable).
 
 ## Inputs (action.yml)
 
@@ -78,6 +82,7 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
 | `provider` | no | `auto` | `openai` \| `anthropic` \| `auto` |
 | `max_tokens` | no | `8192` | Completion budget |
 | `temperature` | no | `0.2` | |
+| `timeout` | no | `300` | Per-LLM-request deadline in seconds (incl. retries); `0` = no client-side cap |
 | `exclude` | no | built-ins | Comma/newline-separated glob patterns |
 | `max_files` | no | `40` | Files per review run |
 | `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file cap) |

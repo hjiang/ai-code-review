@@ -153,6 +153,7 @@ Anthropic adapter; everything else uses the OpenAI adapter. Override with the
 | `provider` | no | `auto` | `openai` \| `anthropic` \| `auto` |
 | `max_tokens` | no | `8192` | Completion budget |
 | `temperature` | no | `0.2` | |
+| `timeout` | no | `300` | Per-LLM-request deadline in seconds (incl. retries); `0` = no client-side cap. Responses stream (SSE) with a 5-minute no-bytes stall detector, so long model thinking is safe; provider limits still apply. |
 | `response_format` | no | `auto` | `auto` \| `off`. `auto` sends `response_format: json_object` and auto-retries without it on an empty/rejected completion; `off` never sends it. Reasoning models can burn the whole token budget on reasoning with `json_object` and return empty content; the action auto-retries once without `response_format` in that case, so `auto` stays the recommended default.
 | `extra_body` | no | - | Optional JSON object merged into the LLM request body (user keys win). DeepSeek V4.1-Flash models (`deepseek-flash`, or the retired `deepseek-v4-flash` alias) get `{"thinking":{"type":"enabled"},"reasoning_effort":"low"}` automatically (see Notes); override to disable thinking (`{"thinking":{"type":"disabled"}}`) or raise the effort. Retried once without it if the provider rejects it with 400. |
 | `exclude` | no | built-ins | Extra glob excludes (comma/newline separated) |

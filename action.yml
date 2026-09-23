@@ -30,6 +30,10 @@ inputs:
     description: 'Sampling temperature'
     default: '0.2'
     required: false
+  timeout:
+    description: 'Per-LLM-request deadline in seconds, covering all retries (default 300). Set 0 for no client-side cap — for very long model thinking. Responses stream (SSE), so long generations survive idle-connection drops; a stream producing no bytes for 5 minutes is treated as stalled and retried. With 0, the request is bounded only by provider limits and your job timeout. Long thinking also needs token headroom: raise max_tokens and pass a thinking budget via extra_body (e.g. Anthropic {"thinking":{"type":"enabled","budget_tokens":N}} with N < max_tokens, or OpenAI-style {"reasoning_effort":"high"}).'
+    default: '300'
+    required: false
   response_format:
     description: 'Send response_format json_object to the provider. auto: send it, retry once without it on an empty/rejected completion (recommended default; reasoning models may need it off). off: never send it.'
     default: 'auto'

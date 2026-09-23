@@ -32,6 +32,7 @@ describe('loadConfig', () => {
     expect(cfg.exclude).toEqual([]);
     expect(cfg.maxFiles).toBe(40);
     expect(cfg.maxPatchChars).toBe(100000);
+    expect(cfg.timeout).toBe(300);
     expect(cfg.reviewDrafts).toBe(false);
     expect(cfg.commentTrigger).toBe('/review');
     expect(cfg.failOnError).toBe(false);
@@ -60,6 +61,14 @@ describe('loadConfig', () => {
     }
     const r = reader({ temperature: '-0.5' });
     expect(() => loadConfig(r)).toThrow('invalid input "temperature"');
+  });
+
+  it('parses timeout in seconds; 0 is valid (uncapped)', () => {
+    expect(loadConfig(reader({ timeout: '900' })).timeout).toBe(900);
+    // 0 disables the client-side deadline entirely (arbitrarily long thinking).
+    expect(loadConfig(reader({ timeout: '0' })).timeout).toBe(0);
+    expect(() => loadConfig(reader({ timeout: '-5' }))).toThrow('invalid input "timeout"');
+    expect(() => loadConfig(reader({ timeout: 'soon' }))).toThrow('invalid input "timeout"');
   });
 
   it('validates the mode value', () => {

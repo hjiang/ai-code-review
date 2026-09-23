@@ -25,6 +25,8 @@ export interface ActionConfig {
   exclude: string[];
   maxFiles: number;
   maxPatchChars: number;
+  /** Per-LLM-request deadline in seconds (covers retries); 0 = no client-side cap. */
+  timeout: number;
   reviewDrafts: boolean;
   commentTrigger: string;
   failOnError: boolean;
@@ -154,6 +156,9 @@ export function loadConfig(reader: InputReader): ActionConfig {
     exclude: splitPatterns(reader.getInput('exclude')),
     maxFiles: intInput(reader, 'max_files', 40),
     maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
+    // 0 is valid: no client-side deadline (streaming + the idle-stall guard
+    // keep uncapped requests safe; provider limits still apply).
+    timeout: intInput(reader, 'timeout', 300, 0),
     reviewDrafts: toBool(reader.getInput('review_drafts')),
     commentTrigger: reader.getInput('comment_trigger') || '/review',
     failOnError: toBool(reader.getInput('fail_on_error'))

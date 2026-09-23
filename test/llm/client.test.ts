@@ -2,20 +2,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { callLLM, resolveProvider, LLMError } from '../../src/llm/client.js';
 import type { LLMConfig } from '../../src/llm/types.js';
 import { backoffMs, sleep } from '../../src/util/retry.js';
+// Streaming-only adapters: every mocked 200 response is an SSE body. The
+// builders keep their historical names so existing tests read unchanged.
+import {
+  openAiSse as openAiOk,
+  anthropicSse as anthropicOk,
+  sseResponse,
+  sseWire,
+  stalledResponse
+} from './sse-helpers.js';
+import type { SSEEvent } from '../../src/llm/sse.js';
 
 function resp(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
     status,
     headers: { 'content-type': 'application/json', ...headers }
   });
-}
-
-function openAiOk(content: string): Response {
-  return resp(200, { choices: [{ message: { content } }] });
-}
-
-function anthropicOk(content: string): Response {
-  return resp(200, { content: [{ type: 'text', text: content }] });
 }
 
 const baseCfg: LLMConfig = {
@@ -256,6 +258,98 @@ describe('callLLM — retries', () => {
   });
 });
 
+describe('callLLM — timeout budget', () => {
+  it('openai: timeoutMs 0 sends no abort signal (uncapped, arbitrarily long thinking)', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(resp(429, 'rate limited')) // retry logic still applies when uncapped
+      .mockResolvedValueOnce(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = callLLM({ ...baseCfg, timeoutMs: 0 }, [{ role: 'user', content: 'hi' }]);
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(promise).resolves.toEqual({ ok: 1 });
+    expect(timeoutSpy).not.toHaveBeenCalled();
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBeUndefined();
+  });
+
+  it('anthropic: timeoutMs 0 sends no abort signal', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(anthropicOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await callLLM({ ...baseCfg, provider: 'anthropic', timeoutMs: 0 }, [
+      { role: 'user', content: 'hi' }
+    ]);
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBeUndefined();
+  });
+
+  it('honors a custom timeoutMs budget shared across retry attempts', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(resp(429, 'rate limited'))
+      .mockResolvedValueOnce(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = callLLM({ ...baseCfg, timeoutMs: 60_000 }, [{ role: 'user', content: 'hi' }]);
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(promise).resolves.toEqual({ ok: 1 });
+    const timeouts = timeoutSpy.mock.calls.map((c) => c[0] as number);
+    expect(timeouts).toHaveLength(2);
+    expect(timeouts[0]).toBeLessThanOrEqual(60_000);
+    expect(timeouts[1]).toBeLessThan(timeouts[0]); // deadline shared, not per-attempt
+  });
+
+  it('openai: timeoutMs Infinity is uncapped too — resolves with no abort signal', async () => {
+    // AbortSignal.timeout(Infinity) throws RangeError, so a non-finite budget
+    // must be treated as uncapped (no signal) instead of reaching the adapter.
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.fn().mockResolvedValue(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await callLLM({ ...baseCfg, timeoutMs: Infinity }, [
+      { role: 'user', content: 'hi' }
+    ]);
+    expect(result).toEqual({ ok: 1 });
+    expect(timeoutSpy).not.toHaveBeenCalled();
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBeUndefined();
+  });
+
+  it('openai: timeoutMs 0 uncapped still stops at 3 attempts on persistent 503', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const fetchMock = vi.fn().mockImplementation(async () => resp(503, 'still down'));
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = callLLM({ ...baseCfg, timeoutMs: 0 }, [{ role: 'user', content: 'hi' }]);
+    // Attach the rejection handler before advancing fake timers (backoffs: 2s + 8s).
+    const expectation = expect(promise).rejects.toThrow(LLMError);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expectation;
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const lastInit = fetchMock.mock.calls[2][1] as RequestInit;
+    expect(lastInit.signal).toBeUndefined(); // uncapped budget does not lift the attempt cap
+  });
+
+  it('openai: timeoutMs 2**40 clamps AbortSignal.timeout to <= 2**31 - 1', async () => {
+    // Node clamps abort delays >= 2^31 ms (and throws for non-finite), so the
+    // adapter must clamp the per-attempt budget into the 31-bit timer range.
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.fn().mockResolvedValue(openAiOk('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await callLLM({ ...baseCfg, timeoutMs: 2 ** 40 }, [{ role: 'user', content: 'hi' }]);
+    const timeouts = timeoutSpy.mock.calls.map((c) => c[0] as number);
+    expect(timeouts.length).toBeGreaterThan(0);
+    for (const t of timeouts) {
+      expect(t).toBeGreaterThan(0);
+      expect(t).toBeLessThanOrEqual(2 ** 31 - 1);
+    }
+  });
+});
+
 describe('callLLM — JSON re-ask', () => {
   it('re-asks once with the parse error when the reply is not JSON', async () => {
     const fetchMock = vi
@@ -348,31 +442,23 @@ describe('callLLM — empty completions (reasoning-model budget burn)', () => {
     expect(thirdBody.messages.at(-1).content).toMatch(/not valid JSON/);
   });
 
-  it('openai: logs the raw provider response (finish_reason/usage) on empty content', async () => {
+  it('openai: logs stream diagnostics (finish_reason, reasoning deltas) on empty content', async () => {
     const logs: string[] = [];
-    const raw = {
-      id: 'chatcmpl-1',
-      choices: [
-        {
-          index: 0,
-          message: { role: 'assistant', content: '', reasoning_content: 'thinking…' },
-          finish_reason: 'length'
-        }
-      ],
-      usage: { prompt_tokens: 100, completion_tokens: 8192, total_tokens: 8292 }
-    };
+    // Budget-burn signature: reasoning deltas streamed, no text content,
+    // finish_reason=length. The retry must carry this diagnosis into the log.
+    const burn: SSEEvent[] = [
+      { event: '', data: JSON.stringify({ choices: [{ delta: { reasoning_content: 'thinking…' } }] }) },
+      { event: '', data: JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] }) }
+    ];
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(resp(200, raw))
+      .mockResolvedValueOnce(openAiOk('', burn))
       .mockResolvedValueOnce(openAiOk('{"ok":1}'));
     vi.stubGlobal('fetch', fetchMock);
     await callLLM({ ...baseCfg, log: (m) => logs.push(m) }, [{ role: 'user', content: 'hi' }]);
     expect(logs[0]).toMatch(/openai extraction failed .*empty completion/);
-    expect(logs[0]).toContain('finish_reason');
-    expect(logs[0]).toContain('length');
+    expect(logs[0]).toContain('finish_reason=length');
     expect(logs[0]).toContain('reasoning_content');
-    expect(logs[0]).toContain('completion_tokens');
-    expect(logs[0]).toContain('8192');
   });
 
   it('openai: gives up with invalid-JSON-twice (raw replies embedded) when every recovery fails', async () => {

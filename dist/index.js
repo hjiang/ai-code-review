@@ -31751,101 +31751,135 @@ class EmptyCompletionError extends Error {
     }
 }
 
-;// CONCATENATED MODULE: ./src/util/text.ts
+;// CONCATENATED MODULE: ./src/llm/sse.ts
 /**
- * Small text helpers for diagnostics and semantic comparison.
+ * Minimal provider-agnostic SSE (server-sent events) parser.
+ *
+ * Contract:
+ * - Pre: `body` is a `ReadableStream<Uint8Array>` of an SSE payload (UTF-8).
+ * - Post: yields one `{event, data}` per complete event block. `event` is the
+ *   named event or `''` when the block has no `event:` line; `data` is the
+ *   concatenation of the block's `data:` lines joined with `\n` (`''` when
+ *   the block has none, e.g. an Anthropic `ping`). Comment lines (leading
+ *   `:`) are dropped. A final event without a trailing blank line is flushed
+ *   when the stream closes.
+ * - Provider-agnostic: no `[DONE]` or event-name special casing here.
  */
-/** One-line, newline-escaped, truncated view of arbitrary text for logs. */
-function excerpt(text, max = 600) {
-    const truncated = text.length > max ? `${text.slice(0, max)}…(+${text.length - max} more chars)` : text;
-    return JSON.stringify(truncated);
-}
-/** Common English function words that carry no topical signal. */
-const STOPWORDS = new Set([
-    'a', 'about', 'above', 'after', 'again', 'all', 'also', 'am', 'an', 'and', 'any', 'are',
-    'as', 'at', 'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but',
-    'by', 'can', 'could', 'did', 'do', 'does', 'doing', 'down', 'during', 'each', 'few', 'for',
-    'from', 'further', 'had', 'has', 'have', 'having', 'he', 'her', 'here', 'hers', 'herself',
-    'him', 'himself', 'his', 'how', 'i', 'if', 'in', 'into', 'is', 'it', 'its', 'itself', 'just',
-    'like', 'may', 'me', 'might', 'more', 'most', 'my', 'myself', 'no', 'nor', 'not', 'now', 'of',
-    'off', 'on', 'once', 'only', 'or', 'other', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
-    'same', 'she', 'should', 'so', 'some', 'such', 'than', 'that', 'the', 'their', 'theirs',
-    'them', 'themselves', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'to',
-    'too', 'under', 'until', 'up', 'very', 'was', 'we', 'were', 'what', 'when', 'where', 'which',
-    'while', 'who', 'whom', 'why', 'will', 'with', 'would', 'you', 'your', 'yours', 'yourself',
-    'yourselves', 'make', 'makes', 'made', 'use', 'uses', 'using', 'used', 'add', 'adds',
-    'added', 'need', 'needs', 'ensure', 'instead'
-]);
 /**
- * Normalize review-comment text into a set of topical tokens: strip severity
- * emoji and markdown decoration, lowercase, drop stopwords and single chars.
- * Used to detect when a new finding repeats a previously reported comment.
+ * Abort if no bytes arrive for this long, so an uncapped request cannot hang
+ * forever on a silently stalled stream. Generous enough to never fire on a
+ * healthy reasoning stream (thinking deltas stream during reasoning).
  */
-function normalizeTokens(text) {
-    const stripped = text
-        .replace(/[🔴🟠🔵]/g, ' ')
-        // Collapse markdown links [label](url) to the label, dropping the URL.
-        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-        // Strip remaining markdown decoration and stray brackets. Ordinary
-        // parentheses are left intact so parenthetical content (e.g. "CWE-89")
-        // still contributes tokens.
-        .replace(/[*_`#>\[\]]/g, ' ')
-        .toLowerCase();
-    const tokens = new Set();
-    for (const m of stripped.match(/[a-z0-9]+/g) ?? []) {
-        if (m.length > 1 && !STOPWORDS.has(m))
-            tokens.add(m);
+const STREAM_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+/** Error thrown when the stream stalls (no bytes for `idleTimeoutMs`). */
+class StreamStalledError extends Error {
+    constructor(idleMs) {
+        super(`llm stream stalled: no bytes for ${idleMs}ms`);
+        this.name = 'StreamStalledError';
     }
-    return tokens;
 }
-/**
- * Fraction of the smaller token set that is contained in the larger set.
- * 1 when one comment is a subset of the other, 0 when they are disjoint.
- */
-function tokenContainment(a, b) {
-    if (a.size === 0 || b.size === 0)
-        return 0;
-    const smaller = a.size <= b.size ? a : b;
-    const larger = smaller === a ? b : a;
-    let shared = 0;
-    for (const t of smaller)
-        if (larger.has(t))
-            shared++;
-    return shared / smaller.size;
+async function* parseSSE(body, idleTimeoutMs = STREAM_IDLE_TIMEOUT_MS) {
+    const decoder = new TextDecoder();
+    const reader = body.getReader();
+    let buffer = '';
+    let event = '';
+    let dataLines = [];
+    const flush = function* () {
+        if (event === '' && dataLines.length === 0)
+            return; // blank separator, not an event
+        yield { event, data: dataLines.join('\n') };
+        event = '';
+        dataLines = [];
+    };
+    /** One read, racing the idle timer; a stall cancels the stream. */
+    const read = () => {
+        let timer;
+        return Promise.race([
+            reader.read(),
+            new Promise((_, reject) => {
+                if (idleTimeoutMs > 0) {
+                    timer = setTimeout(() => {
+                        // Reject FIRST: cancelling first would resolve the pending read
+                        // with {done:true}, settling the race as a normal EOF instead of
+                        // a stall. Connection cleanup happens in the finally below.
+                        reject(new StreamStalledError(idleTimeoutMs));
+                        reader.cancel().catch(() => { });
+                    }, idleTimeoutMs);
+                }
+            })
+        ]).finally(() => clearTimeout(timer));
+    };
+    try {
+        for (;;) {
+            const { done, value } = await read();
+            if (done)
+                break;
+            buffer += decoder.decode(value, { stream: true });
+            let nl;
+            while ((nl = buffer.indexOf('\n')) !== -1) {
+                let line = buffer.slice(0, nl);
+                buffer = buffer.slice(nl + 1);
+                if (line.endsWith('\r'))
+                    line = line.slice(0, -1);
+                if (line === '') {
+                    yield* flush();
+                }
+                else if (line.startsWith(':')) {
+                    // comment / keep-alive; ignore
+                }
+                else if (line.startsWith('event:')) {
+                    event = line.slice(6).trim();
+                }
+                else if (line.startsWith('data:')) {
+                    dataLines.push(line.slice(5).startsWith(' ') ? line.slice(6) : line.slice(5));
+                }
+                // Unknown field names (e.g. `id:`, `retry:`) are ignored per SSE spec.
+            }
+        }
+        buffer += decoder.decode(); // flush multi-byte sequence split across chunks
+        if (buffer !== '') {
+            // EOF without trailing newline: treat the remainder as a final line.
+            if (buffer.startsWith('data:')) {
+                dataLines.push(buffer.slice(5).startsWith(' ') ? buffer.slice(6) : buffer.slice(5));
+            }
+            buffer = '';
+        }
+        yield* flush();
+    }
+    finally {
+        reader.cancel().catch(() => { }); // release the connection on early exit
+    }
 }
 
 ;// CONCATENATED MODULE: ./src/llm/openai.ts
 /**
  * OpenAI-compatible chat completions adapter (native fetch, no SDK).
+ *
+ * Streaming-only: the request carries `stream: true` and the reply is consumed
+ * as an SSE event stream, accumulating `choices[0].delta.content` fragments
+ * until the `[DONE]` sentinel. Streaming keeps bytes flowing during long
+ * provider-side reasoning, so an uncapped budget (`timeoutMs: 0`, no abort
+ * signal) genuinely allows unbounded thinking — the 5-minute idle-stall
+ * detector inside `parseSSE` still applies.
  */
 
 
 
-/** Extract the assistant text from an OpenAI-shaped response. */
-function extractText(data) {
-    const choice = data.choices?.[0];
-    const content = choice?.message?.content ?? choice?.text;
-    if (typeof content !== 'string') {
-        throw new EmptyCompletionError('provider returned no completion content');
-    }
-    if (content.trim().length === 0) {
-        // An empty completion is a provider-side failure mode (e.g. a reasoning
-        // model that exhausted its budget or a gateway glitch). Keep the raw
-        // response diagnostic and let the caller re-ask with a JSON nudge.
-        throw new EmptyCompletionError('provider returned empty completion content');
-    }
-    return content;
-}
 function isResponseFormatError(status, body) {
     return status === 400 && /response_format|json_object/i.test(body);
 }
 /**
- * POST `{base}/chat/completions` and return the assistant text.
- * When `jsonMode` is `auto`, sends `response_format: {type:'json_object'}` and
- * retries once without it if the endpoint rejects the field (common on
- * third-party/self-hosted gateways). `timeoutMs` is the remaining budget for
- * this attempt (shared total deadline). Throws `HttpError` on other non-2xx
- * responses.
+ * POST `{base}/chat/completions` with `stream: true` and return the full
+ * assistant text, accumulated from SSE `delta.content` chunks until `[DONE]`.
+ * DeepSeek-style `reasoning_content` deltas are tracked (for diagnostics) but
+ * never emitted. When `jsonMode` is `auto`, sends
+ * `response_format: {type:'json_object'}` and retries once without it if the
+ * endpoint rejects the field (common on third-party/self-hosted gateways).
+ * `timeoutMs` is the remaining budget for this attempt (shared total
+ * deadline); `0` means uncapped — no abort signal, so the provider may think
+ * arbitrarily long (the 5-minute idle-stall detector in `parseSSE` still
+ * applies). Throws `HttpError` on other non-2xx responses and
+ * `EmptyCompletionError` when no text content arrives.
  */
 async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
     const url = buildOpenAiUrl(cfg.baseUrl);
@@ -31857,25 +31891,27 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
         model: cfg.model,
         messages,
         temperature: cfg.temperature,
-        max_tokens: cfg.maxTokens
+        max_tokens: cfg.maxTokens,
+        // Set before the extraBody merge: a user-supplied `stream: false` wins.
+        stream: true
     };
     if (jsonMode === 'auto')
         body.response_format = { type: 'json_object' };
     if (cfg.extraBody)
         Object.assign(body, cfg.extraBody); // user keys win
-    const doFetch = () => fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs)
-    });
-    let res = await doFetch();
+    // Hard total-deadline abort. Node throws RangeError for Infinity/NaN and
+    // clamps delays ≥ 2^31 ms to a ~1 ms abort, so pin the signal at the
+    // maximum safe timer delay. timeoutMs 0 = uncapped: no AbortSignal at all.
+    const signal = timeoutMs > 0 ? AbortSignal.timeout(Math.min(timeoutMs, 2 ** 31 - 1)) : undefined;
+    let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
     let errorText = null;
     if (!res.ok) {
         errorText = await res.text();
         if (isResponseFormatError(res.status, errorText)) {
             delete body.response_format;
-            res = await doFetch();
+            // JSON.stringify is recomputed: extra_body keys may be gone (below) or
+            // response_format was just deleted.
+            res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
             errorText = null; // fresh body if the retry also failed
         }
         else if (cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
@@ -31884,50 +31920,79 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
             cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
             for (const k of Object.keys(cfg.extraBody))
                 delete body[k];
-            res = await doFetch();
+            res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
             errorText = null;
         }
     }
     if (!res.ok) {
         throw new HttpError(res.status, (errorText ?? (await res.text())).slice(0, 500));
     }
-    const data = (await res.json());
-    try {
-        return extractText(data);
+    // Accumulate the streamed reply. `finish_reason` keeps the first non-null
+    // value: providers send it once, on the chunk that ends the stream, so the
+    // first observation is the reason the content stopped — robust even when a
+    // gateway appends its own empty terminator chunk afterwards.
+    let text = '';
+    let chunks = 0;
+    let reasoningSeen = false;
+    let finishReason;
+    for await (const ev of parseSSE(res.body)) {
+        if (ev.data === '[DONE]')
+            break;
+        chunks++;
+        let chunk;
+        try {
+            chunk = JSON.parse(ev.data);
+        }
+        catch {
+            continue; // keep-alive or malformed data line; judge by what accumulated
+        }
+        const choice = chunk.choices?.[0];
+        const content = choice?.delta?.content;
+        if (typeof content === 'string' && content.length > 0)
+            text += content;
+        const reasoning = choice?.delta?.reasoning_content;
+        if (typeof reasoning === 'string' && reasoning.length > 0)
+            reasoningSeen = true;
+        const reason = choice?.finish_reason;
+        if (finishReason === undefined && typeof reason === 'string' && reason.length > 0) {
+            finishReason = reason;
+        }
     }
-    catch (err) {
-        // Surface the raw provider response (finish_reason, usage, reasoning
-        // fields) so an empty/missing completion is diagnosable in CI logs.
-        cfg.log?.(`llm: openai extraction failed (${err.message}); raw response: ${excerpt(JSON.stringify(data), 1500)}`);
-        throw err;
+    if (text.trim().length === 0) {
+        // An empty completion is a provider-side failure mode (e.g. a reasoning
+        // model that burned its whole budget on thinking deltas). Surface the
+        // stream shape so the retry is diagnosable in CI logs.
+        cfg.log?.(`llm: openai extraction failed (empty completion); chunks=${chunks} finish_reason=${finishReason ?? 'none'} reasoning_content=${reasoningSeen ? 'yes' : 'no'}`);
+        throw new EmptyCompletionError('provider returned empty completion content');
     }
+    return text;
 }
 
 ;// CONCATENATED MODULE: ./src/llm/anthropic.ts
 /**
  * Anthropic Messages API adapter (native fetch, no SDK).
+ *
+ * Streaming-only: the request carries `stream: true` and the reply is consumed
+ * as an SSE event stream, so `timeoutMs: 0` (uncapped — no hard abort signal)
+ * still makes progress as long as the model keeps streaming. The 5-minute
+ * idle-stall detector inside `parseSSE` remains the last-resort guard against
+ * a silently stalled connection.
  */
 
 
 
 const ANTHROPIC_VERSION = '2023-06-01';
-function anthropic_extractText(data) {
-    const block = data.content?.find((b) => b.type === 'text');
-    if (!block || typeof block.text !== 'string') {
-        throw new EmptyCompletionError('provider returned no completion content');
-    }
-    if (block.text.trim().length === 0) {
-        // See openai.ts extractText: empty completions are a provider-side failure
-        // mode; keep the raw response diagnostic and let the caller re-ask.
-        throw new EmptyCompletionError('provider returned empty completion content');
-    }
-    return block.text;
-}
 /**
- * POST `{base}/v1/messages`. System messages are moved into the `system`
- * field (not part of `messages`), as required by the Anthropic API. `timeoutMs`
- * is the remaining budget for this attempt (shared total deadline). Throws
- * `HttpError` on non-2xx responses.
+ * POST `{base}/v1/messages` with `stream: true` (a user-supplied
+ * `extraBody.stream: false` still wins) and consume the reply as SSE: only
+ * `content_block_delta`/`text_delta` events contribute text — `thinking_delta`
+ * and every other delta type are ignored so reasoning never reaches the output
+ * or the empty-detection. System messages are moved into the `system` field
+ * (not part of `messages`), as required by the Anthropic API. `timeoutMs` is
+ * the remaining budget for this attempt (shared total deadline); `0` means
+ * uncapped — no hard abort signal, only parseSSE's idle-stall detector.
+ * Throws `HttpError` on non-2xx responses, a plain (retryable) `Error` on a
+ * mid-stream `error` event, and `EmptyCompletionError` when no text arrived.
  */
 async function anthropicChat(cfg, messages, timeoutMs) {
     const url = buildAnthropicUrl(cfg.baseUrl);
@@ -31942,6 +32007,7 @@ async function anthropicChat(cfg, messages, timeoutMs) {
         model: cfg.model,
         max_tokens: cfg.maxTokens,
         temperature: cfg.temperature,
+        stream: true, // set before the extraBody merge: user keys still win
         messages: chatMessages
     };
     if (system)
@@ -31956,19 +32022,44 @@ async function anthropicChat(cfg, messages, timeoutMs) {
             'content-type': 'application/json'
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs)
+        // Hard total-deadline abort. `timeoutMs 0` = uncapped: no AbortSignal, so
+        // the provider may think arbitrarily long (stream bytes keep the request
+        // alive). Node throws RangeError for timeouts >= 2^31 ms and clamps larger
+        // values to a 1 ms abort, so clamp here.
+        signal: timeoutMs > 0 ? AbortSignal.timeout(Math.min(timeoutMs, 2 ** 31 - 1)) : undefined
     });
     if (!res.ok) {
         throw new HttpError(res.status, (await res.text()).slice(0, 500));
     }
-    const data = (await res.json());
-    try {
-        return anthropic_extractText(data);
+    if (!res.body) {
+        throw new Error('anthropic stream error: 200 response has no body');
     }
-    catch (err) {
-        cfg.log?.(`llm: anthropic extraction failed (${err.message}); raw response: ${excerpt(JSON.stringify(data), 1500)}`);
-        throw err;
+    let text = '';
+    let events = 0;
+    for await (const ev of parseSSE(res.body)) {
+        events++;
+        if (ev.event === 'content_block_delta') {
+            const delta = JSON.parse(ev.data).delta;
+            if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+                text += delta.text;
+            }
+        }
+        else if (ev.event === 'error') {
+            // Mid-stream failure on an HTTP 200 (e.g. overloaded_error). Plain
+            // Error, not LLMError, so requestWithRetry treats it as transient.
+            throw new Error(`anthropic stream error: ${ev.data}`);
+        }
+        else if (ev.event === 'message_stop') {
+            break; // terminal; EOF terminates too
+        }
     }
+    if (text.trim().length === 0) {
+        // See the streaming contract: empty completions are a provider-side
+        // failure mode; log a diagnostic and let the caller re-ask.
+        cfg.log?.(`llm: anthropic extraction failed (empty completion); events=${events}`);
+        throw new EmptyCompletionError('provider returned empty completion content');
+    }
+    return text;
 }
 
 ;// CONCATENATED MODULE: ./src/llm/json.ts
@@ -32033,6 +32124,69 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+;// CONCATENATED MODULE: ./src/util/text.ts
+/**
+ * Small text helpers for diagnostics and semantic comparison.
+ */
+/** One-line, newline-escaped, truncated view of arbitrary text for logs. */
+function excerpt(text, max = 600) {
+    const truncated = text.length > max ? `${text.slice(0, max)}…(+${text.length - max} more chars)` : text;
+    return JSON.stringify(truncated);
+}
+/** Common English function words that carry no topical signal. */
+const STOPWORDS = new Set([
+    'a', 'about', 'above', 'after', 'again', 'all', 'also', 'am', 'an', 'and', 'any', 'are',
+    'as', 'at', 'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but',
+    'by', 'can', 'could', 'did', 'do', 'does', 'doing', 'down', 'during', 'each', 'few', 'for',
+    'from', 'further', 'had', 'has', 'have', 'having', 'he', 'her', 'here', 'hers', 'herself',
+    'him', 'himself', 'his', 'how', 'i', 'if', 'in', 'into', 'is', 'it', 'its', 'itself', 'just',
+    'like', 'may', 'me', 'might', 'more', 'most', 'my', 'myself', 'no', 'nor', 'not', 'now', 'of',
+    'off', 'on', 'once', 'only', 'or', 'other', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
+    'same', 'she', 'should', 'so', 'some', 'such', 'than', 'that', 'the', 'their', 'theirs',
+    'them', 'themselves', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'to',
+    'too', 'under', 'until', 'up', 'very', 'was', 'we', 'were', 'what', 'when', 'where', 'which',
+    'while', 'who', 'whom', 'why', 'will', 'with', 'would', 'you', 'your', 'yours', 'yourself',
+    'yourselves', 'make', 'makes', 'made', 'use', 'uses', 'using', 'used', 'add', 'adds',
+    'added', 'need', 'needs', 'ensure', 'instead'
+]);
+/**
+ * Normalize review-comment text into a set of topical tokens: strip severity
+ * emoji and markdown decoration, lowercase, drop stopwords and single chars.
+ * Used to detect when a new finding repeats a previously reported comment.
+ */
+function normalizeTokens(text) {
+    const stripped = text
+        .replace(/[🔴🟠🔵]/g, ' ')
+        // Collapse markdown links [label](url) to the label, dropping the URL.
+        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+        // Strip remaining markdown decoration and stray brackets. Ordinary
+        // parentheses are left intact so parenthetical content (e.g. "CWE-89")
+        // still contributes tokens.
+        .replace(/[*_`#>\[\]]/g, ' ')
+        .toLowerCase();
+    const tokens = new Set();
+    for (const m of stripped.match(/[a-z0-9]+/g) ?? []) {
+        if (m.length > 1 && !STOPWORDS.has(m))
+            tokens.add(m);
+    }
+    return tokens;
+}
+/**
+ * Fraction of the smaller token set that is contained in the larger set.
+ * 1 when one comment is a subset of the other, 0 when they are disjoint.
+ */
+function tokenContainment(a, b) {
+    if (a.size === 0 || b.size === 0)
+        return 0;
+    const smaller = a.size <= b.size ? a : b;
+    const larger = smaller === a ? b : a;
+    let shared = 0;
+    for (const t of smaller)
+        if (larger.has(t))
+            shared++;
+    return shared / smaller.size;
+}
+
 ;// CONCATENATED MODULE: ./src/llm/client.ts
 /**
  * Provider-agnostic LLM client.
@@ -32054,8 +32208,8 @@ function sleep(ms) {
 
 const MAX_HTTP_ATTEMPTS = 3;
 const MAX_PARSE_ATTEMPTS = 2;
-/** Total budget for one LLM request including all HTTP retries and backoff. */
-const TOTAL_TIMEOUT_MS = 5 * 60 * 1000;
+/** Default total budget for one LLM request including all HTTP retries and backoff. */
+const DEFAULT_TOTAL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Resolve the effective provider from an explicit input + base URL. */
 function resolveProvider(input, baseUrl) {
     if (input === 'openai' || input === 'anthropic')
@@ -32080,14 +32234,21 @@ function isRetryable(err) {
  * One HTTP round-trip with backoff retries; returns the raw reply text.
  * A single deadline is computed up front and each attempt receives the
  * remaining budget, so the total request (all attempts + backoff) cannot
- * exceed `TOTAL_TIMEOUT_MS`.
+ * exceed `cfg.timeoutMs` (default 5 minutes; `0` or any non-finite value =
+ * uncapped — attempts run with no AbortSignal, letting providers reason for
+ * arbitrarily long; non-finite budgets must be uncapped because
+ * `AbortSignal.timeout` throws RangeError for Infinity/NaN).
  */
 async function requestWithRetry(cfg, messages, jsonMode) {
-    const deadline = Date.now() + TOTAL_TIMEOUT_MS;
+    const totalMs = cfg.timeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
+    // `0` and non-finite budgets are both uncapped: AbortSignal.timeout throws
+    // RangeError for Infinity/NaN, which would burn every retry before failing.
+    const uncapped = totalMs === 0 || !Number.isFinite(totalMs);
+    const deadline = uncapped ? Infinity : Date.now() + totalMs;
     let lastErr;
     for (let attempt = 0; attempt < MAX_HTTP_ATTEMPTS; attempt++) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0)
+        const remaining = uncapped ? 0 : deadline - Date.now();
+        if (!uncapped && remaining <= 0)
             break; // total deadline exhausted; give up
         try {
             return await chatOnce(cfg, messages, jsonMode, remaining);
@@ -32100,7 +32261,8 @@ async function requestWithRetry(cfg, messages, jsonMode) {
                 // the message to keep it one-line and secret-free.
                 cfg.log?.(`llm: attempt #${attempt + 1} failed (${String(err)}), retrying`);
                 // Never sleep past the deadline: clamp the backoff to the remaining
-                // budget (skipping the sleep entirely when it is exhausted).
+                // budget (skipping the sleep entirely when it is exhausted). Uncapped
+                // requests clamp to Infinity, i.e. never clamp.
                 const wait = Math.min(backoffMs(attempt), deadline - Date.now());
                 if (wait > 0)
                     await sleep(wait);
@@ -32113,7 +32275,7 @@ async function requestWithRetry(cfg, messages, jsonMode) {
         // The shared deadline was exhausted before any attempt could start (e.g.
         // the clock jumped past the deadline between computation and the first
         // attempt); surface a clear timeout instead of `LLM request failed: undefined`.
-        throw new LLMError(`LLM deadline exceeded after ${TOTAL_TIMEOUT_MS}ms`);
+        throw new LLMError(`LLM deadline exceeded after ${totalMs}ms`);
     }
     if (lastErr instanceof HttpError) {
         throw new LLMError(`LLM HTTP ${lastErr.status}: ${lastErr.message}`);
@@ -32288,6 +32450,9 @@ function loadConfig(reader) {
         exclude: splitPatterns(reader.getInput('exclude')),
         maxFiles: intInput(reader, 'max_files', 40),
         maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
+        // 0 is valid: no client-side deadline (streaming + the idle-stall guard
+        // keep uncapped requests safe; provider limits still apply).
+        timeout: intInput(reader, 'timeout', 300, 0),
         reviewDrafts: toBool(reader.getInput('review_drafts')),
         commentTrigger: reader.getInput('comment_trigger') || '/review',
         failOnError: toBool(reader.getInput('fail_on_error'))
@@ -33247,13 +33412,14 @@ async function main() {
         temperature: cfg.temperature,
         jsonMode: cfg.responseFormat,
         extraBody: cfg.extraBody,
+        timeoutMs: cfg.timeout * 1000,
         log: (msg) => core.info(`ai-code-review: ${msg}`)
     };
     const endpoint = cfg.provider === 'anthropic' ? buildAnthropicUrl(cfg.baseUrl) : buildOpenAiUrl(cfg.baseUrl);
     const extraBodyLog = cfg.extraBody && Object.keys(cfg.extraBody).length > 0
         ? ` extra_body=${JSON.stringify(cfg.extraBody)}`
         : '';
-    core.info(`ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint}${extraBodyLog}`);
+    core.info(`ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint} timeout=${cfg.timeout}s${extraBodyLog}`);
     const llm = (messages) => callLLM(llmCfg, messages);
     let summaryPosted = false;
     let reviewCommentCount = 0;

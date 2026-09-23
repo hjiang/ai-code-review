@@ -19,6 +19,7 @@ const cfg: ActionConfig = {
   exclude: [],
   maxFiles: 40,
   maxPatchChars: 5000,
+  timeout: 300,
   reviewDrafts: false,
   commentTrigger: '/review',
   failOnError: false

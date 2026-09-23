@@ -13,6 +13,14 @@ export interface LLMConfig {
   temperature: number;
   /** `auto`: send `response_format` and retry without it on 400; `off`: never. */
   jsonMode?: 'auto' | 'off';
+  /**
+   * Total budget for one LLM request (all HTTP attempts + backoff), ms.
+   * Defaults to 5 minutes; `0` (or any non-finite value) removes the
+   * client-side deadline. Responses stream (SSE) with a 5-minute no-bytes
+   * stall detector, so uncapped requests support arbitrarily long thinking
+   * (bounded by provider limits and the job timeout).
+   */
+  timeoutMs?: number;
   /** User-supplied extra request-body keys (merged after defaults; user wins). */
   extraBody?: Record<string, unknown>;
   /** Optional diagnostic sink (e.g. Actions `core.info`); receives non-secret LLM chatter. */

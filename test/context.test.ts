@@ -119,6 +119,34 @@ describe('loadConfig', () => {
     expect(() => loadConfig(reader({ temperature: 'hot' }))).toThrow('invalid input "temperature"');
   });
 
+  it('rejects contradictory thinking levels vs extra_body disablers', () => {
+    // A stale extra_body disabler silently won over the thinking input (found
+    // in the wild: `thinking: max` + extra_body thinking.disabled ran with
+    // thinking off), so the direct contradiction fails fast instead.
+    expect(() =>
+      loadConfig(reader({ thinking: 'max', extra_body: '{"thinking":{"type":"disabled"}}' }))
+    ).toThrow(/conflict/i);
+    expect(() =>
+      loadConfig(reader({ thinking: 'high', extra_body: '{"reasoning_effort":"none"}' }))
+    ).toThrow(/conflict/i);
+    expect(() =>
+      loadConfig(reader({ thinking: 'off', extra_body: '{"thinking":{"type":"enabled"}}' }))
+    ).toThrow(/conflict/i);
+    expect(() =>
+      loadConfig(reader({ thinking: 'off', extra_body: '{"reasoning_effort":"low"}' }))
+    ).toThrow(/conflict/i);
+    // Non-contradictory pairings stay allowed: extra_body may refine a level
+    // (e.g. pin a budget) and `auto` defers to extra_body entirely.
+    expect(
+      loadConfig(
+        reader({ thinking: 'high', extra_body: '{"thinking":{"type":"enabled","budget_tokens":20000}}' })
+      ).thinking
+    ).toBe('high');
+    expect(
+      loadConfig(reader({ thinking: 'auto', extra_body: '{"thinking":{"type":"disabled"}}' })).thinking
+    ).toBe('auto');
+  });
+
   it('validates the mode value', () => {
     expect(() => loadConfig(reader({ mode: 'bogus' }))).toThrow(/mode/i);
     expect(loadConfig(reader({ mode: 'summary' })).mode).toBe('summary');

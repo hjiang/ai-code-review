@@ -260,6 +260,13 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
     (effort alone enables reasoning; measured on `deepseek-flash` and
     `deepseek-chat`, 2026-09-24). `thinking: off` sends
     `{"thinking":{"type":"disabled"}}` on `api.deepseek.com`.
+  - `extra_body` is merged last and wins, so a level combined with an
+    `extra_body` that disables thinking (or `off` with one that enables it) is
+    **rejected as contradictory** rather than silently running with the
+    opposite of what you asked for. Pairings that refine instead of
+    contradict — e.g. `thinking: high` plus
+    `{"thinking":{"type":"enabled","budget_tokens":20000}}` — are allowed, and
+    `thinking: auto` defers to `extra_body` entirely.
   - Anthropic Claude 4.6+/5.x: `thinking: high` → adaptive thinking +
     `output_config.effort: high`. Claude 4.5 and earlier reject that shape, so
     the action retries once with extended thinking and a `budget_tokens`

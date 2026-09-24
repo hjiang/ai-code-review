@@ -32609,6 +32609,20 @@ function loadConfig(reader) {
         // change); an explicit extra_body turns thinking on for them.
         extraBody = { thinking: { type: 'enabled' }, reasoning_effort: 'low' };
     }
+    // A direct contradiction between the thinking input and extra_body fails
+    // fast: extra_body is merged last and wins, so `thinking: max` plus a stale
+    // `{"thinking":{"type":"disabled"}}` used to run with thinking silently off.
+    const thinkingObj = extraBody.thinking;
+    const disablesThinking = thinkingObj?.type === 'disabled' || extraBody.reasoning_effort === 'none';
+    const enablesThinking = thinkingObj?.type === 'enabled' || extraBody.reasoning_effort === 'low' ||
+        extraBody.reasoning_effort === 'medium' || extraBody.reasoning_effort === 'high' ||
+        extraBody.reasoning_effort === 'max';
+    if (thinkingInput !== 'auto' && thinkingInput !== 'off' && disablesThinking) {
+        throw new Error(`invalid input "thinking": "${thinkingInput}" conflicts with extra_body, which disables thinking — extra_body is applied last and would win; remove the disabler from extra_body (or set thinking: auto)`);
+    }
+    if (thinkingInput === 'off' && enablesThinking) {
+        throw new Error(`invalid input "thinking": "off" conflicts with extra_body, which enables thinking — remove one of them`);
+    }
     return {
         mode: modeInput,
         githubToken: reader.getInput('github_token'),

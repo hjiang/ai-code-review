@@ -31,7 +31,7 @@ inputs:
     default: ''
     required: false
   thinking:
-    description: 'Thinking effort: auto | off | low | medium | high | max (default auto = built-in behavior, i.e. DeepSeek flash pinned on at low effort). Maps per provider — DeepSeek/OpenAI-style: sends reasoning_effort (off = explicit DeepSeek disable); Anthropic: adaptive thinking + output_config.effort on 4.6+/5.x, falling back to extended thinking with budget_tokens derived from max_tokens (20/35/50/70% per level) on Claude 4.5 and earlier. Thinking tokens count against max_tokens (raise it) and thinking is slow (consider timeout: 0). Gateways with their own knob (e.g. OpenRouter reasoning) stay on extra_body.'
+    description: 'Thinking effort: auto | off | low | medium | high | max (default auto = built-in behavior, i.e. DeepSeek flash pinned on at low effort). Maps per provider — DeepSeek/OpenAI-style: sends reasoning_effort (off = explicit DeepSeek disable); Anthropic: adaptive thinking + output_config.effort on 4.6+/5.x, falling back to extended thinking with budget_tokens derived from max_tokens (20/35/50/70% per level) on Claude 4.5 and earlier. Thinking tokens count against max_tokens (raise it) and thinking is slow (consider timeout: 0). extra_body is merged last and wins, so a level combined with an extra_body that disables thinking (or off with one that enables it) is rejected as contradictory. Gateways with their own knob (e.g. OpenRouter reasoning) stay on extra_body.'
     default: 'auto'
     required: false
   timeout:

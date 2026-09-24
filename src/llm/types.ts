@@ -4,13 +4,23 @@
 
 export type Provider = 'openai' | 'anthropic';
 
+/** Thinking effort, normalized across providers; `auto` = today's behavior. */
+export type ThinkingLevel = 'auto' | 'off' | 'low' | 'medium' | 'high' | 'max';
+
 export interface LLMConfig {
   provider: Provider;
   baseUrl: string;
   apiKey: string;
   model: string;
   maxTokens: number;
-  temperature: number;
+  /**
+   * Sampling temperature. Omitted from the request when undefined (Anthropic:
+   * Claude 4.7+/5.x reject any non-default value with 400, even without
+   * thinking, so the action leaves it unset unless configured explicitly).
+   */
+  temperature?: number;
+  /** Provider-mapped thinking effort; `auto` and `off` send no effort level. */
+  thinking?: ThinkingLevel;
   /** `auto`: send `response_format` and retry without it on 400; `off`: never. */
   jsonMode?: 'auto' | 'off';
   /**

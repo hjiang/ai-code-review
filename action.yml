@@ -27,11 +27,15 @@ inputs:
     default: '8192'
     required: false
   temperature:
-    description: 'Sampling temperature'
-    default: '0.2'
+    description: 'Sampling temperature. Default 0.2 for OpenAI-compatible providers; unset (provider default) for Anthropic, whose 4.7+/5.x models reject any non-default value with a 400 — set it explicitly only if your model allows it.'
+    default: ''
+    required: false
+  thinking:
+    description: 'Thinking effort: auto | off | low | medium | high | max (default auto = built-in behavior, i.e. DeepSeek flash pinned on at low effort). Maps per provider — DeepSeek/OpenAI-style: sends reasoning_effort (off = explicit DeepSeek disable); Anthropic: adaptive thinking + output_config.effort on 4.6+/5.x, falling back to extended thinking with budget_tokens derived from max_tokens (20/35/50/70% per level) on Claude 4.5 and earlier. Thinking tokens count against max_tokens (raise it) and thinking is slow (consider timeout: 0). Gateways with their own knob (e.g. OpenRouter reasoning) stay on extra_body.'
+    default: 'auto'
     required: false
   timeout:
-    description: 'Deadline in seconds for the whole LLM call, across all retries and re-asks (default 300). Set 0 for no client-side cap — for very long model thinking. Responses stream (SSE), so long generations survive idle-connection drops; a stream producing no bytes for 5 minutes is treated as stalled and retried. With 0, the request is bounded only by provider limits and your job timeout. Long thinking also needs token headroom: raise max_tokens and pass a thinking budget via extra_body (e.g. Anthropic {"thinking":{"type":"enabled","budget_tokens":N}} with N < max_tokens and temperature 1, since the Anthropic API rejects other temperatures while thinking is on; or OpenAI-style {"reasoning_effort":"high"}). A rejected extra_body is dropped once and the request retried.'
+    description: 'Deadline in seconds for the whole LLM call, across all retries and re-asks (default 300). Set 0 for no client-side cap — for very long model thinking. Responses stream (SSE), so long generations survive idle-connection drops; a stream producing no bytes for 5 minutes is treated as stalled and retried. With 0, the request is bounded only by provider limits and your job timeout. Long thinking also needs token headroom: raise max_tokens; use the thinking input to pick the effort (or extra_body for provider-specific knobs). A rejected extra_body is dropped once and the request retried.'
     default: '300'
     required: false
   response_format:

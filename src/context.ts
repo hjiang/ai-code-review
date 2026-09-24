@@ -5,7 +5,7 @@
  */
 
 import { resolveProvider } from './llm/client.js';
-import type { Provider } from './llm/types.js';
+import type { Provider, ThinkingLevel } from './llm/types.js';
 
 export type Mode = 'summary' | 'review' | 'both';
 
@@ -19,7 +19,10 @@ export interface ActionConfig {
   model: string;
   provider: Provider;
   maxTokens: number;
-  temperature: number;
+  /** Sampling temperature; unset for Anthropic unless configured explicitly. */
+  temperature?: number;
+  /** Normalized thinking effort (`auto` = provider default). */
+  thinking: ThinkingLevel;
   responseFormat: ResponseFormat;
   extraBody: Record<string, unknown>;
   exclude: string[];
@@ -124,6 +127,26 @@ export function loadConfig(reader: InputReader): ActionConfig {
     throw new Error(`invalid response_format "${responseFormatInput}": expected auto | off`);
   }
 
+  const thinkingLevels = ['auto', 'off', 'low', 'medium', 'high', 'max'] as const;
+  const thinkingInput = (reader.getInput('thinking') || 'auto').toLowerCase();
+  if (!(thinkingLevels as readonly string[]).includes(thinkingInput)) {
+    throw new Error(
+      `invalid input "thinking": "${reader.getInput('thinking')}" is not one of ${thinkingLevels.join(' | ')}`
+    );
+  }
+
+  const provider = resolveProvider(reader.getInput('provider') || 'auto', baseUrl);
+  const temperatureRaw = reader.getInput('temperature');
+  // Anthropic omits temperature unless set explicitly: Claude 4.7+/5.x reject
+  // any non-default value with 400 (thinking or not), and thinking requires the
+  // default on older models. OpenAI-compatible keeps the 0.2 default.
+  const temperature =
+    temperatureRaw !== ''
+      ? numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0)
+      : provider === 'anthropic'
+        ? undefined
+        : 0.2;
+
   const extraBodyRaw = reader.getInput('extra_body') || '';
   let extraBody: Record<string, unknown> = {};
   if (extraBodyRaw.trim()) {
@@ -137,6 +160,7 @@ export function loadConfig(reader: InputReader): ActionConfig {
       throw new Error(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
     }
   } else if (
+    thinkingInput === 'auto' &&
     /api\.deepseek\.com/i.test(baseUrl) &&
     /^deepseek-(?:v4-)?flash(?:$|-)/i.test(model)
   ) {
@@ -164,9 +188,10 @@ export function loadConfig(reader: InputReader): ActionConfig {
     apiKey,
     baseUrl,
     model,
-    provider: resolveProvider(reader.getInput('provider') || 'auto', baseUrl),
+    provider,
     maxTokens: intInput(reader, 'max_tokens', 8192),
-    temperature: numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0),
+    temperature,
+    thinking: thinkingInput as ThinkingLevel,
     responseFormat: responseFormatInput as ResponseFormat,
     extraBody,
     exclude: splitPatterns(reader.getInput('exclude')),

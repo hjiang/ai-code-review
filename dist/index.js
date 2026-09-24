@@ -31895,11 +31895,26 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
     const body = {
         model: cfg.model,
         messages,
-        temperature: cfg.temperature,
         max_tokens: cfg.maxTokens,
         // Set before the extraBody merge: a user-supplied `stream: false` wins.
         stream: true
     };
+    if (cfg.temperature !== undefined)
+        body.temperature = cfg.temperature;
+    if (cfg.thinking !== undefined && cfg.thinking !== 'auto') {
+        if (cfg.thinking === 'off') {
+            // DeepSeek has an explicit disable; other OpenAI-compatible endpoints may
+            // not know the field (the 400 compat retry drops it once).
+            if (/deepseek/i.test(cfg.baseUrl))
+                body.thinking = { type: 'disabled' };
+        }
+        else {
+            // `reasoning_effort` alone enables reasoning on DeepSeek (measured on
+            // deepseek-chat/flash) and is the standard control on OpenAI reasoning
+            // models; a `thinking` object would 400 on generic gateways.
+            body.reasoning_effort = cfg.thinking;
+        }
+    }
     if (jsonMode === 'auto')
         body.response_format = { type: 'json_object' };
     if (cfg.extraBody)
@@ -32007,6 +32022,23 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
 
 
 const ANTHROPIC_VERSION = '2023-06-01';
+/** Fraction of `max_tokens` per level; must leave room for the reply text. */
+const EFFORT_BUDGET_FRACTION = {
+    low: 0.2,
+    medium: 0.35,
+    high: 0.5,
+    max: 0.7
+};
+/**
+ * Legacy extended-thinking budget derived from the completion budget.
+ * Contract: 1024 <= result <= maxTokens - 1024 (the API requires a minimum of
+ * 1024 and strictly less than `max_tokens`, and the reply needs room too), so
+ * `maxTokens` must be >= 2048 for a valid result.
+ */
+function thinkingBudgetTokens(level, maxTokens) {
+    const fraction = EFFORT_BUDGET_FRACTION[level];
+    return Math.min(Math.max(1024, Math.round(maxTokens * fraction)), maxTokens - 1024);
+}
 /**
  * POST `{base}/v1/messages` with `stream: true` (a user-supplied
  * `extraBody.stream: false` still wins) and consume the reply as SSE: only
@@ -32031,10 +32063,21 @@ async function anthropicChat(cfg, messages, timeoutMs) {
     const body = {
         model: cfg.model,
         max_tokens: cfg.maxTokens,
-        temperature: cfg.temperature,
         stream: true, // set before the extraBody merge: user keys still win
         messages: chatMessages
     };
+    if (cfg.temperature !== undefined)
+        body.temperature = cfg.temperature;
+    const level = cfg.thinking === 'low' || cfg.thinking === 'medium' || cfg.thinking === 'high' || cfg.thinking === 'max'
+        ? cfg.thinking
+        : undefined;
+    if (level) {
+        // Modern shape (Claude 4.6+/5.x): adaptive thinking + a top-level effort.
+        // Legacy-only models (<= 4.5) reject it; the failover below swaps in
+        // extended thinking with a budget derived from max_tokens.
+        body.thinking = { type: 'adaptive' };
+        body.output_config = { effort: level };
+    }
     if (system)
         body.system = system;
     if (cfg.extraBody)
@@ -32050,17 +32093,36 @@ async function anthropicChat(cfg, messages, timeoutMs) {
     // non-finite delays and clamps values >= 2^31 ms to a 1 ms abort, so clamp.
     const signal = timeoutMs > 0 ? AbortSignal.timeout(Math.min(timeoutMs, 2 ** 31 - 1)) : undefined;
     let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
-    if (!res.ok && res.status === 400 && cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
-        // The provider rejected a user-supplied extra param (e.g. thinking with a
-        // temperature other than 1); retry once without it, mirroring openai.ts.
-        cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
-        for (const k of Object.keys(cfg.extraBody))
-            delete body[k];
-        // JSON.stringify is recomputed: extra_body keys are gone from `body`.
-        res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
-    }
     if (!res.ok) {
-        throw new HttpError(res.status, (await res.text()).slice(0, 500));
+        let errorText = (await res.text()).slice(0, 500);
+        if (res.status === 400 && level && /thinking|effort|output_config/i.test(errorText)) {
+            // The model rejected adaptive thinking/effort: extended thinking is the
+            // only mode on Claude 4.5 and earlier. Its budget must be >= 1024 and
+            // strictly below max_tokens, so it needs max_tokens >= 2048.
+            if (cfg.maxTokens < 2048) {
+                throw new HttpError(res.status, `${errorText} — this model rejects adaptive thinking and max_tokens=${cfg.maxTokens} is too small for extended thinking (needs >= 2048 so budget_tokens can be >= 1024 and still leave room for the reply)`);
+            }
+            cfg.log?.('llm: model rejected adaptive thinking; retrying with extended thinking + auto budget');
+            delete body.output_config;
+            body.thinking = { type: 'enabled', budget_tokens: thinkingBudgetTokens(level, cfg.maxTokens) };
+            res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+            if (!res.ok)
+                errorText = (await res.text()).slice(0, 500);
+        }
+        if (!res.ok && cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
+            // The provider rejected a user-supplied extra param (e.g. thinking with a
+            // temperature other than 1); retry once without it, mirroring openai.ts.
+            cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
+            for (const k of Object.keys(cfg.extraBody))
+                delete body[k];
+            // JSON.stringify is recomputed: extra_body keys are gone from `body`.
+            res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+            if (!res.ok)
+                errorText = (await res.text()).slice(0, 500);
+        }
+        if (!res.ok) {
+            throw new HttpError(res.status, errorText);
+        }
     }
     if (!(res.headers.get('content-type') ?? '').includes('text/event-stream')) {
         // The endpoint answered with a plain JSON completion: it ignored
@@ -32498,6 +32560,21 @@ function loadConfig(reader) {
     if (responseFormatInput !== 'auto' && responseFormatInput !== 'off') {
         throw new Error(`invalid response_format "${responseFormatInput}": expected auto | off`);
     }
+    const thinkingLevels = ['auto', 'off', 'low', 'medium', 'high', 'max'];
+    const thinkingInput = (reader.getInput('thinking') || 'auto').toLowerCase();
+    if (!thinkingLevels.includes(thinkingInput)) {
+        throw new Error(`invalid input "thinking": "${reader.getInput('thinking')}" is not one of ${thinkingLevels.join(' | ')}`);
+    }
+    const provider = resolveProvider(reader.getInput('provider') || 'auto', baseUrl);
+    const temperatureRaw = reader.getInput('temperature');
+    // Anthropic omits temperature unless set explicitly: Claude 4.7+/5.x reject
+    // any non-default value with 400 (thinking or not), and thinking requires the
+    // default on older models. OpenAI-compatible keeps the 0.2 default.
+    const temperature = temperatureRaw !== ''
+        ? numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0)
+        : provider === 'anthropic'
+            ? undefined
+            : 0.2;
     const extraBodyRaw = reader.getInput('extra_body') || '';
     let extraBody = {};
     if (extraBodyRaw.trim()) {
@@ -32512,7 +32589,8 @@ function loadConfig(reader) {
             throw new Error(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
         }
     }
-    else if (/api\.deepseek\.com/i.test(baseUrl) &&
+    else if (thinkingInput === 'auto' &&
+        /api\.deepseek\.com/i.test(baseUrl) &&
         /^deepseek-(?:v4-)?flash(?:$|-)/i.test(model)) {
         // The retired v4-flash-era API defaulted thinking to ENABLED (documented
         // at https://api-docs.deepseek.com). v4-flash reasoning burned the whole
@@ -32537,9 +32615,10 @@ function loadConfig(reader) {
         apiKey,
         baseUrl,
         model,
-        provider: resolveProvider(reader.getInput('provider') || 'auto', baseUrl),
+        provider,
         maxTokens: intInput(reader, 'max_tokens', 8192),
-        temperature: numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0),
+        temperature,
+        thinking: thinkingInput,
         responseFormat: responseFormatInput,
         extraBody,
         exclude: splitPatterns(reader.getInput('exclude')),
@@ -33505,6 +33584,7 @@ async function main() {
         model: cfg.model,
         maxTokens: cfg.maxTokens,
         temperature: cfg.temperature,
+        thinking: cfg.thinking,
         jsonMode: cfg.responseFormat,
         extraBody: cfg.extraBody,
         timeoutMs: cfg.timeout * 1000,
@@ -33514,7 +33594,7 @@ async function main() {
     const extraBodyLog = cfg.extraBody && Object.keys(cfg.extraBody).length > 0
         ? ` extra_body=${JSON.stringify(cfg.extraBody)}`
         : '';
-    core.info(`ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint} timeout=${cfg.timeout}s${extraBodyLog}`);
+    core.info(`ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} thinking=${cfg.thinking} endpoint=${endpoint} timeout=${cfg.timeout}s${extraBodyLog}`);
     const llm = (messages) => callLLM(llmCfg, messages);
     let summaryPosted = false;
     let reviewCommentCount = 0;

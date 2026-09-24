@@ -226,3 +226,60 @@ describe('openaiChat — SSE streaming', () => {
     expect(logs.join('\n')).toMatch(/not SSE/i);
   });
 });
+
+describe('openaiChat — thinking levels', () => {
+  it('maps a level to reasoning_effort and sends no thinking object', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(openAiSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await openaiChat({ ...baseCfg, thinking: 'high' }, msgs, 'off', 1000);
+    const body = jsonBody(fetchMock.mock.calls[0][1]);
+    expect(body.reasoning_effort).toBe('high');
+    expect(body.thinking).toBeUndefined();
+  });
+
+  it('thinking off disables thinking explicitly on DeepSeek base URLs', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(openAiSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await openaiChat(
+      { ...baseCfg, baseUrl: 'https://api.deepseek.com', thinking: 'off' },
+      msgs,
+      'off',
+      1000
+    );
+    const body = jsonBody(fetchMock.mock.calls[0][1]);
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it('thinking off omits reasoning controls entirely on other endpoints', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(openAiSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await openaiChat({ ...baseCfg, thinking: 'off' }, msgs, 'off', 1000);
+    const body = jsonBody(fetchMock.mock.calls[0][1]);
+    expect(body.thinking).toBeUndefined();
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it('lets extra_body override the thinking mapping (user keys win)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(openAiSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await openaiChat(
+      { ...baseCfg, thinking: 'high', extraBody: { reasoning_effort: 'low' } },
+      msgs,
+      'off',
+      1000
+    );
+    expect(jsonBody(fetchMock.mock.calls[0][1]).reasoning_effort).toBe('low');
+  });
+
+  it('omits temperature when unset and sends it when set', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(openAiSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await openaiChat({ ...baseCfg, temperature: undefined }, msgs, 'off', 1000);
+    expect(jsonBody(fetchMock.mock.calls[0][1]).temperature).toBeUndefined();
+    const fetch2 = vi.fn().mockResolvedValue(openAiSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetch2);
+    await openaiChat({ ...baseCfg, temperature: 0.5 }, msgs, 'off', 1000);
+    expect(jsonBody(fetch2.mock.calls[0][1]).temperature).toBe(0.5);
+  });
+});

@@ -15,6 +15,28 @@ import type { LLMConfig, LLMMessage } from './types.js';
 
 const ANTHROPIC_VERSION = '2023-06-01';
 
+/** Thinking levels that map to an Anthropic effort/budget (all but auto/off). */
+type ThinkingEffort = 'low' | 'medium' | 'high' | 'max';
+
+/** Fraction of `max_tokens` per level; must leave room for the reply text. */
+const EFFORT_BUDGET_FRACTION: Record<ThinkingEffort, number> = {
+  low: 0.2,
+  medium: 0.35,
+  high: 0.5,
+  max: 0.7
+};
+
+/**
+ * Legacy extended-thinking budget derived from the completion budget.
+ * Contract: 1024 <= result <= maxTokens - 1024 (the API requires a minimum of
+ * 1024 and strictly less than `max_tokens`, and the reply needs room too), so
+ * `maxTokens` must be >= 2048 for a valid result.
+ */
+export function thinkingBudgetTokens(level: ThinkingEffort, maxTokens: number): number {
+  const fraction = EFFORT_BUDGET_FRACTION[level];
+  return Math.min(Math.max(1024, Math.round(maxTokens * fraction)), maxTokens - 1024);
+}
+
 /** `delta` payload of a `content_block_delta` / `message_delta` event. */
 interface AnthropicDelta {
   type?: string;
@@ -62,10 +84,21 @@ export async function anthropicChat(
   const body: Record<string, unknown> = {
     model: cfg.model,
     max_tokens: cfg.maxTokens,
-    temperature: cfg.temperature,
     stream: true, // set before the extraBody merge: user keys still win
     messages: chatMessages
   };
+  if (cfg.temperature !== undefined) body.temperature = cfg.temperature;
+  const level: ThinkingEffort | undefined =
+    cfg.thinking === 'low' || cfg.thinking === 'medium' || cfg.thinking === 'high' || cfg.thinking === 'max'
+      ? cfg.thinking
+      : undefined;
+  if (level) {
+    // Modern shape (Claude 4.6+/5.x): adaptive thinking + a top-level effort.
+    // Legacy-only models (<= 4.5) reject it; the failover below swaps in
+    // extended thinking with a budget derived from max_tokens.
+    body.thinking = { type: 'adaptive' };
+    body.output_config = { effort: level };
+  }
   if (system) body.system = system;
   if (cfg.extraBody) Object.assign(body, cfg.extraBody); // user keys win
 
@@ -81,16 +114,38 @@ export async function anthropicChat(
   const signal =
     timeoutMs > 0 ? AbortSignal.timeout(Math.min(timeoutMs, 2 ** 31 - 1)) : undefined;
   let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
-  if (!res.ok && res.status === 400 && cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
-    // The provider rejected a user-supplied extra param (e.g. thinking with a
-    // temperature other than 1); retry once without it, mirroring openai.ts.
-    cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
-    for (const k of Object.keys(cfg.extraBody)) delete body[k];
-    // JSON.stringify is recomputed: extra_body keys are gone from `body`.
-    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
-  }
   if (!res.ok) {
-    throw new HttpError(res.status, (await res.text()).slice(0, 500));
+    let errorText = (await res.text()).slice(0, 500);
+    if (res.status === 400 && level && /thinking|effort|output_config/i.test(errorText)) {
+      // The model rejected adaptive thinking/effort: extended thinking is the
+      // only mode on Claude 4.5 and earlier. Its budget must be >= 1024 and
+      // strictly below max_tokens, so it needs max_tokens >= 2048.
+      if (cfg.maxTokens < 2048) {
+        throw new HttpError(
+          res.status,
+          `${errorText} — this model rejects adaptive thinking and max_tokens=${cfg.maxTokens} is too small for extended thinking (needs >= 2048 so budget_tokens can be >= 1024 and still leave room for the reply)`
+        );
+      }
+      cfg.log?.(
+        'llm: model rejected adaptive thinking; retrying with extended thinking + auto budget'
+      );
+      delete body.output_config;
+      body.thinking = { type: 'enabled', budget_tokens: thinkingBudgetTokens(level, cfg.maxTokens) };
+      res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+      if (!res.ok) errorText = (await res.text()).slice(0, 500);
+    }
+    if (!res.ok && cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
+      // The provider rejected a user-supplied extra param (e.g. thinking with a
+      // temperature other than 1); retry once without it, mirroring openai.ts.
+      cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
+      for (const k of Object.keys(cfg.extraBody)) delete body[k];
+      // JSON.stringify is recomputed: extra_body keys are gone from `body`.
+      res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+      if (!res.ok) errorText = (await res.text()).slice(0, 500);
+    }
+    if (!res.ok) {
+      throw new HttpError(res.status, errorText);
+    }
   }
 
   if (!(res.headers.get('content-type') ?? '').includes('text/event-stream')) {

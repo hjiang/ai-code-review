@@ -119,9 +119,8 @@ also use **Run workflow** (workflow_dispatch) and give it a PR number.
 ### 3. Optional: enable extended thinking
 
 DeepSeek `deepseek-flash` needs nothing — thinking is auto-enabled at low
-effort when `extra_body` is unset. Every other model takes an explicit
-`extra_body`, and thinking usually needs headroom in `max_tokens` and
-`timeout`:
+effort when `extra_body` is unset. For anything else, use the `thinking`
+input (and give it token headroom):
 
 ```yaml
       - uses: ./
@@ -130,14 +129,16 @@ effort when `extra_body` is unset. Every other model takes an explicit
           api_base_url: ${{ secrets.LLM_BASE_URL }}
           api_key: ${{ secrets.LLM_API_KEY }}
           model: ${{ vars.LLM_MODEL }}
+          thinking: high       # auto | off | low | medium | high | max
           max_tokens: 32000    # thinking tokens count against this budget
           timeout: 0           # no client-side cap; streaming keeps this safe
-          # Claude also needs temperature: 1 — the API rejects other values
-          # while thinking is on. Use budget_tokens < max_tokens.
-          extra_body: '{"thinking":{"type":"enabled","budget_tokens":20000}}'
 ```
 
-Other recipes (`{"reasoning_effort":"high"}`, `deepseek-reasoner`, …) are in
+The level maps per provider: DeepSeek/OpenAI-style models get
+`reasoning_effort`; Anthropic gets adaptive thinking + `output_config.effort`
+on Claude 4.6+/5.x, or extended thinking with `budget_tokens` derived from
+`max_tokens` on 4.5 and earlier. Gateways with their own knob (OpenRouter's
+`reasoning`) stay on `extra_body` — see
 [Notes & limitations](#notes--limitations).
 
 ### Required secrets / variables
@@ -176,7 +177,8 @@ Anthropic adapter; everything else uses the OpenAI adapter. Override with the
 | `model` | yes | — | Model name |
 | `provider` | no | `auto` | `openai` \| `anthropic` \| `auto` |
 | `max_tokens` | no | `8192` | Completion budget |
-| `temperature` | no | `0.2` | |
+| `temperature` | no | — | `0.2` for OpenAI-compatible providers; unset for Anthropic, whose 4.7+/5.x models reject non-default values with a 400 |
+| `thinking` | no | `auto` | `auto` \| `off` \| `low` \| `medium` \| `high` \| `max`. Normalized thinking effort: DeepSeek/OpenAI-style → `reasoning_effort`; Anthropic → adaptive thinking + `output_config.effort` (4.6+/5.x) or extended thinking with `budget_tokens` auto-derived from `max_tokens` (≤4.5). See Notes. |
 | `timeout` | no | `300` | Deadline in seconds for the whole LLM call (all retries and re-asks); `0` = no client-side cap. Responses stream (SSE) with a 5-minute no-bytes stall detector, so long model thinking is safe; provider limits still apply. |
 | `response_format` | no | `auto` | `auto` \| `off`. `auto` sends `response_format: json_object` and auto-retries without it on an empty/rejected completion; `off` never sends it. Reasoning models can burn the whole token budget on reasoning with `json_object` and return empty content; the action auto-retries once without `response_format` in that case, so `auto` stays the recommended default.
 | `extra_body` | no | - | Optional JSON object merged into the LLM request body (user keys win). DeepSeek V4.1-Flash models (`deepseek-flash`, or the retired `deepseek-v4-flash` alias) get `{"thinking":{"type":"enabled"},"reasoning_effort":"low"}` automatically (see Notes); override to disable thinking (`{"thinking":{"type":"disabled"}}`) or raise the effort. Retried once without it if the provider rejects it with 400. |
@@ -251,20 +253,26 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
   `extra_body: '{"thinking":{"type":"disabled"}}'` (measured on v4-flash:
   ~10s per call vs 60-165s, valid JSON on every trial, more findings). An
   explicit `extra_body` always wins - including `{}` (send nothing).
-- **Enabling thinking per provider** (all via `extra_body`; an explicit value
-  always wins over the automatic DeepSeek default, and a rejected `extra_body`
-  is dropped once and retried):
-  - DeepSeek `deepseek-flash` on `api.deepseek.com`: automatic at
-    `reasoning_effort: low`; raise it with
-    `'{"thinking":{"type":"enabled"},"reasoning_effort":"high"}'`.
-  - DeepSeek `deepseek-chat`: thinking is OFF unless you ask for it (measured
-    2026-09-24: no `reasoning_content` without a control, streamed with both
-    `'{"thinking":{"type":"enabled"}}'` and `'{"reasoning_effort":"high"}'`).
-  - DeepSeek `deepseek-reasoner`: always reasons; no configuration needed.
-  - Anthropic Claude: `'{"thinking":{"type":"enabled","budget_tokens":N}}'`
-    with `N < max_tokens`, and set `temperature: 1` (the API rejects other
-    temperatures while thinking is on).
-  - OpenAI-style reasoning models: `'{"reasoning_effort":"high"}'`.
+- **Enabling thinking per provider** — prefer the `thinking` input
+  (`auto | off | low | medium | high | max`, default `auto`); an explicit
+  `extra_body` still overrides whatever the input maps to:
+  - DeepSeek (any model): `thinking: high` → `reasoning_effort: high`
+    (effort alone enables reasoning; measured on `deepseek-flash` and
+    `deepseek-chat`, 2026-09-24). `thinking: off` sends
+    `{"thinking":{"type":"disabled"}}` on `api.deepseek.com`.
+  - Anthropic Claude 4.6+/5.x: `thinking: high` → adaptive thinking +
+    `output_config.effort: high`. Claude 4.5 and earlier reject that shape, so
+    the action retries once with extended thinking and a `budget_tokens`
+    derived from `max_tokens` (low 20%, medium 35%, high 50%, max 70%,
+    clamped to `[1024, max_tokens - 1024]` — the API requires ≥1024 and
+    strictly less than `max_tokens`, and the reply needs room). `thinking:
+    off` sends no thinking configuration (newest models reject `disabled`).
+  - Prefill/reasoning models that always think (e.g. `deepseek-reasoner`):
+    nothing to configure; `thinking: off` sends no controls, but such models
+    may still reason.
+  - Gateways with their own unified knob (OpenRouter: `reasoning: {effort}` or
+    `reasoning: {max_tokens}`) — set it via `extra_body`, e.g.
+    `'{"reasoning":{"effort":"high"}}'`.
   - Thinking tokens count against `max_tokens`, so raise it (see the
     reasoning-model measurements above); thinking is slow, so consider
     `timeout: 0` (safe with streaming) or a larger value.

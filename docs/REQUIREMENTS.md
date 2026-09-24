@@ -70,6 +70,13 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
   stream (SSE), so this permits arbitrarily long model thinking, bounded only
   by provider limits and the job timeout. A stream producing no bytes for
   5 minutes is treated as stalled (retryable).
+- FR-P6: `thinking` levels (`auto | off | low | medium | high | max`) are
+  normalized and mapped per provider: DeepSeek/OpenAI-compatible send
+  `reasoning_effort` (`off` = DeepSeek `thinking: disabled`); Anthropic sends
+  adaptive thinking + `output_config.effort` on 4.6+/5.x and fails over once
+  to extended thinking (`budget_tokens` derived from `max_tokens`) on models
+  that reject it. `temperature` is omitted when unset (Anthropic default),
+  and user `extra_body` keys override every mapped value.
 
 ## Inputs (action.yml)
 
@@ -81,9 +88,10 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
 | `api_key` | yes | — | Secret |
 | `model` | yes | — | e.g. `deepseek-chat`, `claude-sonnet-4-5` |
 | `provider` | no | `auto` | `openai` \| `anthropic` \| `auto` |
-| `max_tokens` | no | `8192` | Completion budget |
-| `temperature` | no | `0.2` | |
-| `timeout` | no | `300` | Per-LLM-request deadline in seconds (incl. retries); `0` = no client-side cap |
+| `max_tokens` | no | `8192` | Completion budget (thinking counts against it) |
+| `temperature` | no | — | `0.2` for OpenAI-compatible; unset for Anthropic (4.7+/5.x reject non-default values) |
+| `thinking` | no | `auto` | `auto` \| `off` \| `low` \| `medium` \| `high` \| `max` — normalized effort, mapped per provider (FR-P6) |
+| `timeout` | no | `300` | Deadline in seconds for the whole LLM call (incl. retries and re-asks); `0` = no client-side cap |
 | `exclude` | no | built-ins | Comma/newline-separated glob patterns |
 | `max_files` | no | `40` | Files per review run |
 | `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file cap) |

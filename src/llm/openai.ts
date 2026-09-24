@@ -59,11 +59,23 @@ export async function openaiChat(
   const body: Record<string, unknown> = {
     model: cfg.model,
     messages,
-    temperature: cfg.temperature,
     max_tokens: cfg.maxTokens,
     // Set before the extraBody merge: a user-supplied `stream: false` wins.
     stream: true
   };
+  if (cfg.temperature !== undefined) body.temperature = cfg.temperature;
+  if (cfg.thinking !== undefined && cfg.thinking !== 'auto') {
+    if (cfg.thinking === 'off') {
+      // DeepSeek has an explicit disable; other OpenAI-compatible endpoints may
+      // not know the field (the 400 compat retry drops it once).
+      if (/deepseek/i.test(cfg.baseUrl)) body.thinking = { type: 'disabled' };
+    } else {
+      // `reasoning_effort` alone enables reasoning on DeepSeek (measured on
+      // deepseek-chat/flash) and is the standard control on OpenAI reasoning
+      // models; a `thinking` object would 400 on generic gateways.
+      body.reasoning_effort = cfg.thinking;
+    }
+  }
   if (jsonMode === 'auto') body.response_format = { type: 'json_object' };
   if (cfg.extraBody) Object.assign(body, cfg.extraBody); // user keys win
 

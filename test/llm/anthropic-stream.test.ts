@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { anthropicChat } from '../../src/llm/anthropic.js';
+import { anthropicChat, thinkingBudgetTokens } from '../../src/llm/anthropic.js';
 import { callLLM } from '../../src/llm/client.js';
 import { EmptyCompletionError } from '../../src/llm/types.js';
 import type { LLMConfig, LLMMessage } from '../../src/llm/types.js';
@@ -307,5 +307,91 @@ describe('anthropicChat — robustness', () => {
     expect(retry.thinking).toBeUndefined(); // rejected param dropped
     expect(retry.temperature).toBe(0.2); // base fields retained
     expect(logs.join('\n')).toMatch(/extra_body/i);
+  });
+});
+
+describe('anthropicChat — thinking levels', () => {
+  it('maps a level to adaptive thinking + output_config.effort', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(anthropicSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await anthropicChat({ ...cfg, thinking: 'high' }, userMsg, 1000);
+    const body = jsonBody(fetchMock.mock.calls[0][1] as RequestInit);
+    expect(body.thinking).toEqual({ type: 'adaptive' });
+    expect(body.output_config).toEqual({ effort: 'high' });
+  });
+
+  it('thinking off and auto send no thinking configuration', async () => {
+    for (const thinking of ['off', 'auto'] as const) {
+      const fetchMock = vi.fn().mockResolvedValue(anthropicSse('{"ok":1}'));
+      vi.stubGlobal('fetch', fetchMock);
+      await anthropicChat({ ...cfg, thinking }, userMsg, 1000);
+      const body = jsonBody(fetchMock.mock.calls[0][1] as RequestInit);
+      expect(body.thinking).toBeUndefined();
+      expect(body.output_config).toBeUndefined();
+    }
+  });
+
+  it('fails over to extended thinking with an auto budget when the model rejects adaptive', async () => {
+    const logs: string[] = [];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        resp(400, {
+          error: { type: 'invalid_request_error', message: 'thinking.type: "adaptive" is not supported' }
+        })
+      )
+      .mockResolvedValueOnce(anthropicSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    // maxTokens 8192, level high → 50% = 4096 (leaves room for the reply).
+    await anthropicChat(
+      { ...cfg, thinking: 'high', maxTokens: 8192, log: (m) => logs.push(m) },
+      userMsg,
+      1000
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const retry = jsonBody(fetchMock.mock.calls[1][1] as RequestInit);
+    expect(retry.thinking).toEqual({ type: 'enabled', budget_tokens: 4096 });
+    expect(retry.output_config).toBeUndefined();
+    expect(logs.join('\n')).toMatch(/extended thinking/i);
+  });
+
+  it('errors clearly when adaptive is unsupported and max_tokens is too small for extended', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        resp(400, { error: { message: 'thinking.type: "adaptive" is not supported' } })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const err = (await anthropicChat(
+      { ...cfg, thinking: 'high', maxTokens: 1024 },
+      userMsg,
+      1000
+    ).catch((e) => e)) as Error;
+    expect(String(err.message)).toMatch(/max_tokens/);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no pointless retry
+  });
+
+  it('omits temperature when unset and sends it when set', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(anthropicSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await anthropicChat({ ...cfg, temperature: undefined }, userMsg, 1000);
+    expect(jsonBody(fetchMock.mock.calls[0][1] as RequestInit).temperature).toBeUndefined();
+    const fetch2 = vi.fn().mockResolvedValue(anthropicSse('{"ok":1}'));
+    vi.stubGlobal('fetch', fetch2);
+    await anthropicChat({ ...cfg, temperature: 1 }, userMsg, 1000);
+    expect(jsonBody(fetch2.mock.calls[0][1] as RequestInit).temperature).toBe(1);
+  });
+});
+
+describe('thinkingBudgetTokens', () => {
+  it('scales with max_tokens (20/35/50/70%) and clamps to [1024, max-1024]', () => {
+    expect(thinkingBudgetTokens('low', 8192)).toBe(1638);
+    expect(thinkingBudgetTokens('medium', 8192)).toBe(2867);
+    expect(thinkingBudgetTokens('high', 8192)).toBe(4096);
+    expect(thinkingBudgetTokens('max', 8192)).toBe(5734);
+    // Floor: small budgets clamp to the 1,024-token API minimum.
+    expect(thinkingBudgetTokens('low', 2048)).toBe(1024);
+    // Ceiling: always leave >= 1,024 tokens for the reply text.
+    expect(thinkingBudgetTokens('max', 3000)).toBe(1976);
   });
 });

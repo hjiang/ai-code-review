@@ -136,6 +136,18 @@ appear as separate reviews - the natural "multiple times per PR" behavior.
     (reasoning-model budget burn) retries once without `response_format`, then
     falls through to the re-ask path; on non-JSON response, re-asks once with a
     JSON nudge appended; throws `LLMError` after 2 parse failures.
+- `openaiChat` / `anthropicChat` -> `string` (full assistant text)
+  - Pre: `config.thinking` is a normalized level; `config.temperature` may be
+    undefined (omitted from the request — Anthropic 4.7+/5.x reject any
+    non-default value with a 400).
+  - Post: the level is mapped to provider parameters — OpenAI-compatible:
+    `reasoning_effort` (`off` → `thinking: disabled` on DeepSeek base URLs);
+    Anthropic: `thinking: adaptive` + `output_config.effort`, failing over
+    once to `thinking: enabled` with
+    `budget_tokens = clamp(max_tokens × {low .2, medium .35, high .5, max .7},
+    1024, max_tokens - 1024)` when the model rejects the adaptive shape
+    (Claude ≤4.5; needs `max_tokens >= 2048`). User `extraBody` keys are
+    merged last and win; a 400 rejection drops them once and retries.
 - `validateFindings(findings, prFiles)` -> `ValidFinding[]`
   - Post: every returned finding has `path ∈ diff`, `line ∈ newLines(path)`,
     severity ∈ enum, non-empty comment. Invalid ones are logged and dropped.

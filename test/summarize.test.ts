@@ -14,6 +14,7 @@ const cfg: ActionConfig = {
   provider: 'openai',
   maxTokens: 100,
   temperature: 0,
+  thinking: 'auto',
   responseFormat: 'auto',
   extraBody: {},
   exclude: [],

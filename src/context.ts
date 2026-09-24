@@ -140,8 +140,8 @@ export function loadConfig(reader: InputReader): ActionConfig {
     /api\.deepseek\.com/i.test(baseUrl) &&
     /^deepseek-(?:v4-)?flash(?:$|-)/i.test(model)
   ) {
-    // DeepSeek's API defaults thinking to ENABLED (documented at
-    // https://api-docs.deepseek.com). v4-flash reasoning burned the whole
+    // The retired v4-flash-era API defaulted thinking to ENABLED (documented
+    // at https://api-docs.deepseek.com). v4-flash reasoning burned the whole
     // token budget on reasoning_content for review-sized prompts, so this
     // action used to auto-disable thinking. DeepSeek-V4.1-Flash (model
     // `deepseek-flash`; the retired `deepseek-v4-flash` name routes to it)
@@ -150,10 +150,11 @@ export function loadConfig(reader: InputReader): ActionConfig {
     // bounded chain-of-thought without the budget burn (an explicit
     // extra_body always wins, e.g. set
     // {"thinking":{"type":"disabled"}} to opt back out).
-    // Gated to flash models: `thinking`/`reasoning_effort` are V4.1-Flash
-    // controls, and `deepseek-chat` can reject them - injecting them there
-    // would force the compatibility retry in openai.ts (a wasted request plus
-    // latency/rate-limit cost) on every call.
+    // Gated to flash models: the auto-default is a cost/quality decision for
+    // the flash line only. Measured 2026-09-24: `deepseek-chat` does NOT
+    // reason unless a thinking/reasoning_effort control is supplied, and it
+    // accepts both - so other models are left untouched (no silent cost
+    // change); an explicit extra_body turns thinking on for them.
     extraBody = { thinking: { type: 'enabled' }, reasoning_effort: 'low' };
   }
 

@@ -116,6 +116,30 @@ jobs:
 another review. Pushing new commits (`synchronize`) also re-runs it. You can
 also use **Run workflow** (workflow_dispatch) and give it a PR number.
 
+### 3. Optional: enable extended thinking
+
+DeepSeek `deepseek-flash` needs nothing — thinking is auto-enabled at low
+effort when `extra_body` is unset. Every other model takes an explicit
+`extra_body`, and thinking usually needs headroom in `max_tokens` and
+`timeout`:
+
+```yaml
+      - uses: ./
+        with:
+          mode: review
+          api_base_url: ${{ secrets.LLM_BASE_URL }}
+          api_key: ${{ secrets.LLM_API_KEY }}
+          model: ${{ vars.LLM_MODEL }}
+          max_tokens: 32000    # thinking tokens count against this budget
+          timeout: 0           # no client-side cap; streaming keeps this safe
+          # Claude also needs temperature: 1 — the API rejects other values
+          # while thinking is on. Use budget_tokens < max_tokens.
+          extra_body: '{"thinking":{"type":"enabled","budget_tokens":20000}}'
+```
+
+Other recipes (`{"reasoning_effort":"high"}`, `deepseek-reasoner`, …) are in
+[Notes & limitations](#notes--limitations).
+
 ### Required secrets / variables
 
 | Name | Where | Example |
@@ -210,10 +234,11 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
     fewest findings of any config (median 2, one trial zero) - reduced
     reasoning made the model hedge ("can't be sure without more context") and
     suppress real issues.
-- **DeepSeek default: thinking ON at low effort (automatic).** DeepSeek's API
-  defaults thinking to **enabled** (documented at api-docs.deepseek.com),
-  which is what made v4-flash burn its budget - so this action used to
-  auto-apply `thinking: {"type": "disabled"}`. DeepSeek-V4.1-Flash (model
+- **DeepSeek default: thinking ON at low effort (automatic).** The retired
+  v4-flash-era API defaulted thinking to **enabled** (documented at
+  api-docs.deepseek.com), which is what made v4-flash burn its budget - so
+  this action used to auto-apply `thinking: {"type": "disabled"}`.
+  DeepSeek-V4.1-Flash (model
   `deepseek-flash`; the retired `deepseek-v4-flash` name is routed to it)
   added a reasoning-effort control and claims improved reasoning efficiency,
   so the action now auto-applies `{"thinking":{"type":"enabled"},"reasoning_effort":"low"}`
@@ -226,9 +251,23 @@ Built-in excludes always apply: lockfiles (`*.lock`, `package-lock.json`,
   `extra_body: '{"thinking":{"type":"disabled"}}'` (measured on v4-flash:
   ~10s per call vs 60-165s, valid JSON on every trial, more findings). An
   explicit `extra_body` always wins - including `{}` (send nothing).
-  - Other providers with reasoning models: set `extra_body` yourself, e.g.
-    `'{"thinking":{"type":"disabled"}}'` (DeepSeek-style) or
-    `'{"reasoning_effort":"low"}'`.
+- **Enabling thinking per provider** (all via `extra_body`; an explicit value
+  always wins over the automatic DeepSeek default, and a rejected `extra_body`
+  is dropped once and retried):
+  - DeepSeek `deepseek-flash` on `api.deepseek.com`: automatic at
+    `reasoning_effort: low`; raise it with
+    `'{"thinking":{"type":"enabled"},"reasoning_effort":"high"}'`.
+  - DeepSeek `deepseek-chat`: thinking is OFF unless you ask for it (measured
+    2026-09-24: no `reasoning_content` without a control, streamed with both
+    `'{"thinking":{"type":"enabled"}}'` and `'{"reasoning_effort":"high"}'`).
+  - DeepSeek `deepseek-reasoner`: always reasons; no configuration needed.
+  - Anthropic Claude: `'{"thinking":{"type":"enabled","budget_tokens":N}}'`
+    with `N < max_tokens`, and set `temperature: 1` (the API rejects other
+    temperatures while thinking is on).
+  - OpenAI-style reasoning models: `'{"reasoning_effort":"high"}'`.
+  - Thinking tokens count against `max_tokens`, so raise it (see the
+    reasoning-model measurements above); thinking is slow, so consider
+    `timeout: 0` (safe with streaming) or a larger value.
 - **Repo context**: the LLM prompt includes repository metadata fetched from
   the GitHub API — `owner/repo`, **visibility (public/private)**, description,
   default branch, primary language, and fork/archived flags — so the model can

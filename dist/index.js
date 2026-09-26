@@ -31751,101 +31751,140 @@ class EmptyCompletionError extends Error {
     }
 }
 
-;// CONCATENATED MODULE: ./src/util/text.ts
+;// CONCATENATED MODULE: ./src/llm/sse.ts
 /**
- * Small text helpers for diagnostics and semantic comparison.
+ * Minimal provider-agnostic SSE (server-sent events) parser.
+ *
+ * Contract:
+ * - Pre: `body` is a `ReadableStream<Uint8Array>` of an SSE payload (UTF-8).
+ * - Post: yields one `{event, data}` per complete event block. `event` is the
+ *   named event or `''` when the block has no `event:` line; `data` is the
+ *   concatenation of the block's `data:` lines joined with `\n` (`''` when
+ *   the block has none, e.g. an Anthropic `ping`). Comment lines (leading
+ *   `:`) are dropped. A final event without a trailing blank line is flushed
+ *   when the stream closes.
+ * - Provider-agnostic: no `[DONE]` or event-name special casing here.
+ *
+ * Caveat: consume the iterator to completion or break at a yield point.
+ * Abandoning it (`gen.return()`) while a read is pending can surface a
+ * `StreamStalledError` as a process-level uncaught exception instead of a
+ * rejection. Current adapters only exit at yield points, so this is latent.
  */
-/** One-line, newline-escaped, truncated view of arbitrary text for logs. */
-function excerpt(text, max = 600) {
-    const truncated = text.length > max ? `${text.slice(0, max)}…(+${text.length - max} more chars)` : text;
-    return JSON.stringify(truncated);
-}
-/** Common English function words that carry no topical signal. */
-const STOPWORDS = new Set([
-    'a', 'about', 'above', 'after', 'again', 'all', 'also', 'am', 'an', 'and', 'any', 'are',
-    'as', 'at', 'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but',
-    'by', 'can', 'could', 'did', 'do', 'does', 'doing', 'down', 'during', 'each', 'few', 'for',
-    'from', 'further', 'had', 'has', 'have', 'having', 'he', 'her', 'here', 'hers', 'herself',
-    'him', 'himself', 'his', 'how', 'i', 'if', 'in', 'into', 'is', 'it', 'its', 'itself', 'just',
-    'like', 'may', 'me', 'might', 'more', 'most', 'my', 'myself', 'no', 'nor', 'not', 'now', 'of',
-    'off', 'on', 'once', 'only', 'or', 'other', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
-    'same', 'she', 'should', 'so', 'some', 'such', 'than', 'that', 'the', 'their', 'theirs',
-    'them', 'themselves', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'to',
-    'too', 'under', 'until', 'up', 'very', 'was', 'we', 'were', 'what', 'when', 'where', 'which',
-    'while', 'who', 'whom', 'why', 'will', 'with', 'would', 'you', 'your', 'yours', 'yourself',
-    'yourselves', 'make', 'makes', 'made', 'use', 'uses', 'using', 'used', 'add', 'adds',
-    'added', 'need', 'needs', 'ensure', 'instead'
-]);
 /**
- * Normalize review-comment text into a set of topical tokens: strip severity
- * emoji and markdown decoration, lowercase, drop stopwords and single chars.
- * Used to detect when a new finding repeats a previously reported comment.
+ * Abort if no bytes arrive for this long, so an uncapped request cannot hang
+ * forever on a silently stalled stream. Generous enough to never fire on a
+ * healthy reasoning stream (thinking deltas stream during reasoning).
  */
-function normalizeTokens(text) {
-    const stripped = text
-        .replace(/[🔴🟠🔵]/g, ' ')
-        // Collapse markdown links [label](url) to the label, dropping the URL.
-        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-        // Strip remaining markdown decoration and stray brackets. Ordinary
-        // parentheses are left intact so parenthetical content (e.g. "CWE-89")
-        // still contributes tokens.
-        .replace(/[*_`#>\[\]]/g, ' ')
-        .toLowerCase();
-    const tokens = new Set();
-    for (const m of stripped.match(/[a-z0-9]+/g) ?? []) {
-        if (m.length > 1 && !STOPWORDS.has(m))
-            tokens.add(m);
+const STREAM_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+/** Error thrown when the stream stalls (no bytes for `idleTimeoutMs`). */
+class StreamStalledError extends Error {
+    constructor(idleMs) {
+        super(`llm stream stalled: no bytes for ${idleMs}ms`);
+        this.name = 'StreamStalledError';
     }
-    return tokens;
 }
-/**
- * Fraction of the smaller token set that is contained in the larger set.
- * 1 when one comment is a subset of the other, 0 when they are disjoint.
- */
-function tokenContainment(a, b) {
-    if (a.size === 0 || b.size === 0)
-        return 0;
-    const smaller = a.size <= b.size ? a : b;
-    const larger = smaller === a ? b : a;
-    let shared = 0;
-    for (const t of smaller)
-        if (larger.has(t))
-            shared++;
-    return shared / smaller.size;
+async function* parseSSE(body, idleTimeoutMs = STREAM_IDLE_TIMEOUT_MS) {
+    const decoder = new TextDecoder();
+    const reader = body.getReader();
+    let buffer = '';
+    let event = '';
+    let dataLines = [];
+    const flush = function* () {
+        if (event === '' && dataLines.length === 0)
+            return; // blank separator, not an event
+        yield { event, data: dataLines.join('\n') };
+        event = '';
+        dataLines = [];
+    };
+    /** One read, racing the idle timer; a stall cancels the stream. */
+    const read = () => {
+        let timer;
+        return Promise.race([
+            reader.read(),
+            new Promise((_, reject) => {
+                if (idleTimeoutMs > 0) {
+                    timer = setTimeout(() => {
+                        // Reject FIRST: cancelling first would resolve the pending read
+                        // with {done:true}, settling the race as a normal EOF instead of
+                        // a stall. Connection cleanup happens in the finally below.
+                        reject(new StreamStalledError(idleTimeoutMs));
+                        reader.cancel().catch(() => { });
+                    }, idleTimeoutMs);
+                }
+            })
+        ]).finally(() => clearTimeout(timer));
+    };
+    try {
+        for (;;) {
+            const { done, value } = await read();
+            if (done)
+                break;
+            buffer += decoder.decode(value, { stream: true });
+            let nl;
+            while ((nl = buffer.indexOf('\n')) !== -1) {
+                let line = buffer.slice(0, nl);
+                buffer = buffer.slice(nl + 1);
+                if (line.endsWith('\r'))
+                    line = line.slice(0, -1);
+                if (line === '') {
+                    yield* flush();
+                }
+                else if (line.startsWith(':')) {
+                    // comment / keep-alive; ignore
+                }
+                else if (line.startsWith('event:')) {
+                    event = line.slice(6).trim();
+                }
+                else if (line.startsWith('data:')) {
+                    dataLines.push(line.slice(5).startsWith(' ') ? line.slice(6) : line.slice(5));
+                }
+                // Unknown field names (e.g. `id:`, `retry:`) are ignored per SSE spec.
+            }
+        }
+        buffer += decoder.decode(); // flush multi-byte sequence split across chunks
+        if (buffer !== '') {
+            // EOF without trailing newline: treat the remainder as a final line.
+            if (buffer.startsWith('data:')) {
+                dataLines.push(buffer.slice(5).startsWith(' ') ? buffer.slice(6) : buffer.slice(5));
+            }
+            buffer = '';
+        }
+        yield* flush();
+    }
+    finally {
+        reader.cancel().catch(() => { }); // release the connection on early exit
+    }
 }
 
 ;// CONCATENATED MODULE: ./src/llm/openai.ts
 /**
  * OpenAI-compatible chat completions adapter (native fetch, no SDK).
+ *
+ * Streaming-only: the request carries `stream: true` and the reply is consumed
+ * as an SSE event stream, accumulating `choices[0].delta.content` fragments
+ * until the `[DONE]` sentinel. Streaming keeps bytes flowing during long
+ * provider-side reasoning, so an uncapped budget (`timeoutMs: 0`, no abort
+ * signal) genuinely allows unbounded thinking — the 5-minute idle-stall
+ * detector inside `parseSSE` still applies.
  */
 
 
 
-/** Extract the assistant text from an OpenAI-shaped response. */
-function extractText(data) {
-    const choice = data.choices?.[0];
-    const content = choice?.message?.content ?? choice?.text;
-    if (typeof content !== 'string') {
-        throw new EmptyCompletionError('provider returned no completion content');
-    }
-    if (content.trim().length === 0) {
-        // An empty completion is a provider-side failure mode (e.g. a reasoning
-        // model that exhausted its budget or a gateway glitch). Keep the raw
-        // response diagnostic and let the caller re-ask with a JSON nudge.
-        throw new EmptyCompletionError('provider returned empty completion content');
-    }
-    return content;
-}
 function isResponseFormatError(status, body) {
     return status === 400 && /response_format|json_object/i.test(body);
 }
 /**
- * POST `{base}/chat/completions` and return the assistant text.
- * When `jsonMode` is `auto`, sends `response_format: {type:'json_object'}` and
- * retries once without it if the endpoint rejects the field (common on
- * third-party/self-hosted gateways). `timeoutMs` is the remaining budget for
- * this attempt (shared total deadline). Throws `HttpError` on other non-2xx
- * responses.
+ * POST `{base}/chat/completions` with `stream: true` and return the full
+ * assistant text, accumulated from SSE `delta.content` chunks until `[DONE]`.
+ * DeepSeek-style `reasoning_content` deltas are tracked (for diagnostics) but
+ * never emitted. When `jsonMode` is `auto`, sends
+ * `response_format: {type:'json_object'}` and retries once without it if the
+ * endpoint rejects the field (common on third-party/self-hosted gateways).
+ * `timeoutMs` is the remaining budget for this attempt (shared total
+ * deadline); `0` means uncapped — no abort signal, so the provider may think
+ * arbitrarily long (the 5-minute idle-stall detector in `parseSSE` still
+ * applies). Throws `HttpError` on other non-2xx responses and
+ * `EmptyCompletionError` when no text content arrives.
  */
 async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
     const url = buildOpenAiUrl(cfg.baseUrl);
@@ -31856,26 +31895,43 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
     const body = {
         model: cfg.model,
         messages,
-        temperature: cfg.temperature,
-        max_tokens: cfg.maxTokens
+        max_tokens: cfg.maxTokens,
+        // Set before the extraBody merge: a user-supplied `stream: false` wins.
+        stream: true
     };
+    if (cfg.temperature !== undefined)
+        body.temperature = cfg.temperature;
+    if (cfg.thinking !== undefined && cfg.thinking !== 'auto') {
+        if (cfg.thinking === 'off') {
+            // DeepSeek has an explicit disable; other OpenAI-compatible endpoints may
+            // not know the field (the 400 compat retry drops it once).
+            if (/deepseek/i.test(cfg.baseUrl))
+                body.thinking = { type: 'disabled' };
+        }
+        else {
+            // `reasoning_effort` alone enables reasoning on DeepSeek (measured on
+            // deepseek-chat/flash) and is the standard control on OpenAI reasoning
+            // models; a `thinking` object would 400 on generic gateways.
+            body.reasoning_effort = cfg.thinking;
+        }
+    }
     if (jsonMode === 'auto')
         body.response_format = { type: 'json_object' };
     if (cfg.extraBody)
         Object.assign(body, cfg.extraBody); // user keys win
-    const doFetch = () => fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs)
-    });
-    let res = await doFetch();
+    // Hard total-deadline abort. Node throws RangeError for Infinity/NaN and
+    // clamps delays ≥ 2^31 ms to a ~1 ms abort, so pin the signal at the
+    // maximum safe timer delay. timeoutMs 0 = uncapped: no AbortSignal at all.
+    const signal = timeoutMs > 0 ? AbortSignal.timeout(Math.min(timeoutMs, 2 ** 31 - 1)) : undefined;
+    let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
     let errorText = null;
     if (!res.ok) {
         errorText = await res.text();
         if (isResponseFormatError(res.status, errorText)) {
             delete body.response_format;
-            res = await doFetch();
+            // JSON.stringify is recomputed: extra_body keys may be gone (below) or
+            // response_format was just deleted.
+            res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
             errorText = null; // fresh body if the retry also failed
         }
         else if (cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
@@ -31884,50 +31940,116 @@ async function openaiChat(cfg, messages, jsonMode, timeoutMs) {
             cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
             for (const k of Object.keys(cfg.extraBody))
                 delete body[k];
-            res = await doFetch();
+            res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
             errorText = null;
         }
     }
     if (!res.ok) {
         throw new HttpError(res.status, (errorText ?? (await res.text())).slice(0, 500));
     }
-    const data = (await res.json());
-    try {
-        return extractText(data);
+    if (!(res.headers.get('content-type') ?? '').includes('text/event-stream')) {
+        // The endpoint answered with a plain JSON completion: it ignored
+        // `stream: true`, or the user set extra_body {"stream": false} (a
+        // documented escape hatch). Handle it rather than misreporting an empty
+        // stream. Note: long-thinking requests lose streaming's idle protection.
+        cfg.log?.('llm: openai response is not SSE (endpoint ignored stream:true); reading the JSON completion');
+        const data = (await res.json());
+        const choice = data.choices?.[0];
+        const content = choice?.message?.content ?? choice?.text;
+        if (typeof content !== 'string' || content.trim().length === 0) {
+            throw new EmptyCompletionError('provider returned empty completion content');
+        }
+        return content;
     }
-    catch (err) {
-        // Surface the raw provider response (finish_reason, usage, reasoning
-        // fields) so an empty/missing completion is diagnosable in CI logs.
-        cfg.log?.(`llm: openai extraction failed (${err.message}); raw response: ${excerpt(JSON.stringify(data), 1500)}`);
-        throw err;
+    // Accumulate the streamed reply. `finish_reason` keeps the first non-null
+    // value: providers send it once, on the chunk that ends the stream, so the
+    // first observation is the reason the content stopped — robust even when a
+    // gateway appends its own empty terminator chunk afterwards.
+    let text = '';
+    let chunks = 0;
+    let reasoningSeen = false;
+    let finishReason;
+    for await (const ev of parseSSE(res.body)) {
+        if (ev.data === '[DONE]')
+            break;
+        chunks++;
+        let chunk;
+        try {
+            chunk = JSON.parse(ev.data);
+        }
+        catch {
+            continue; // keep-alive or malformed data line; judge by what accumulated
+        }
+        if (chunk.error !== undefined) {
+            // Mid-stream provider failure on an HTTP 200 (e.g. OpenRouter sends
+            // `data: {"error": {...}}`). Plain Error = retryable, and the payload
+            // reaches the retry log instead of masquerading as an empty completion.
+            throw new Error(`openai stream error: ${ev.data}`);
+        }
+        const choice = chunk.choices?.[0];
+        const content = choice?.delta?.content;
+        if (typeof content === 'string' && content.length > 0)
+            text += content;
+        const reasoning = choice?.delta?.reasoning_content;
+        if (typeof reasoning === 'string' && reasoning.length > 0)
+            reasoningSeen = true;
+        const reason = choice?.finish_reason;
+        if (finishReason === undefined && typeof reason === 'string' && reason.length > 0) {
+            finishReason = reason;
+        }
     }
+    if (text.trim().length === 0) {
+        // An empty completion is a provider-side failure mode (e.g. a reasoning
+        // model that burned its whole budget on thinking deltas). Surface the
+        // stream shape so the retry is diagnosable in CI logs.
+        cfg.log?.(`llm: openai extraction failed (empty completion); chunks=${chunks} finish_reason=${finishReason ?? 'none'} reasoning_content=${reasoningSeen ? 'yes' : 'no'}`);
+        throw new EmptyCompletionError('provider returned empty completion content');
+    }
+    return text;
 }
 
 ;// CONCATENATED MODULE: ./src/llm/anthropic.ts
 /**
  * Anthropic Messages API adapter (native fetch, no SDK).
+ *
+ * Streaming-only: the request carries `stream: true` and the reply is consumed
+ * as an SSE event stream, so `timeoutMs: 0` (uncapped — no hard abort signal)
+ * still makes progress as long as the model keeps streaming. The 5-minute
+ * idle-stall detector inside `parseSSE` remains the last-resort guard against
+ * a silently stalled connection.
  */
 
 
 
 const ANTHROPIC_VERSION = '2023-06-01';
-function anthropic_extractText(data) {
-    const block = data.content?.find((b) => b.type === 'text');
-    if (!block || typeof block.text !== 'string') {
-        throw new EmptyCompletionError('provider returned no completion content');
-    }
-    if (block.text.trim().length === 0) {
-        // See openai.ts extractText: empty completions are a provider-side failure
-        // mode; keep the raw response diagnostic and let the caller re-ask.
-        throw new EmptyCompletionError('provider returned empty completion content');
-    }
-    return block.text;
+/** Fraction of `max_tokens` per level; must leave room for the reply text. */
+const EFFORT_BUDGET_FRACTION = {
+    low: 0.2,
+    medium: 0.35,
+    high: 0.5,
+    max: 0.7
+};
+/**
+ * Legacy extended-thinking budget derived from the completion budget.
+ * Contract: 1024 <= result <= maxTokens - 1024 (the API requires a minimum of
+ * 1024 and strictly less than `max_tokens`, and the reply needs room too), so
+ * `maxTokens` must be >= 2048 for a valid result.
+ */
+function thinkingBudgetTokens(level, maxTokens) {
+    const fraction = EFFORT_BUDGET_FRACTION[level];
+    return Math.min(Math.max(1024, Math.round(maxTokens * fraction)), maxTokens - 1024);
 }
 /**
- * POST `{base}/v1/messages`. System messages are moved into the `system`
- * field (not part of `messages`), as required by the Anthropic API. `timeoutMs`
- * is the remaining budget for this attempt (shared total deadline). Throws
- * `HttpError` on non-2xx responses.
+ * POST `{base}/v1/messages` with `stream: true` (a user-supplied
+ * `extraBody.stream: false` still wins) and consume the reply as SSE: only
+ * `content_block_delta`/`text_delta` events contribute text — `thinking_delta`
+ * and every other delta type are ignored so reasoning never reaches the output
+ * or the empty-detection. System messages are moved into the `system` field
+ * (not part of `messages`), as required by the Anthropic API. `timeoutMs` is
+ * the remaining budget for this attempt (shared total deadline); `0` means
+ * uncapped — no hard abort signal, only parseSSE's idle-stall detector.
+ * Throws `HttpError` on non-2xx responses, a plain (retryable) `Error` on a
+ * mid-stream `error` event, and `EmptyCompletionError` when no text arrived.
  */
 async function anthropicChat(cfg, messages, timeoutMs) {
     const url = buildAnthropicUrl(cfg.baseUrl);
@@ -31941,34 +32063,137 @@ async function anthropicChat(cfg, messages, timeoutMs) {
     const body = {
         model: cfg.model,
         max_tokens: cfg.maxTokens,
-        temperature: cfg.temperature,
+        stream: true, // set before the extraBody merge: user keys still win
         messages: chatMessages
     };
+    if (cfg.temperature !== undefined)
+        body.temperature = cfg.temperature;
+    const level = cfg.thinking === 'low' || cfg.thinking === 'medium' || cfg.thinking === 'high' || cfg.thinking === 'max'
+        ? cfg.thinking
+        : undefined;
+    if (level) {
+        // Modern shape (Claude 4.6+/5.x): adaptive thinking + a top-level effort.
+        // Legacy-only models (<= 4.5) reject it; the failover below swaps in
+        // extended thinking with a budget derived from max_tokens.
+        body.thinking = { type: 'adaptive' };
+        body.output_config = { effort: level };
+    }
     if (system)
         body.system = system;
     if (cfg.extraBody)
         Object.assign(body, cfg.extraBody); // user keys win
-    const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'x-api-key': cfg.apiKey,
-            'anthropic-version': ANTHROPIC_VERSION,
-            'content-type': 'application/json'
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs)
-    });
+    const headers = {
+        'x-api-key': cfg.apiKey,
+        'anthropic-version': ANTHROPIC_VERSION,
+        'content-type': 'application/json'
+    };
+    // Hard total-deadline abort, computed once for all attempts. `timeoutMs 0` =
+    // uncapped: no AbortSignal, so the provider may think arbitrarily long
+    // (stream bytes keep the request alive). Node throws RangeError for
+    // non-finite delays and clamps values >= 2^31 ms to a 1 ms abort, so clamp.
+    const signal = timeoutMs > 0 ? AbortSignal.timeout(Math.min(timeoutMs, 2 ** 31 - 1)) : undefined;
+    let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
     if (!res.ok) {
-        throw new HttpError(res.status, (await res.text()).slice(0, 500));
+        let errorText = (await res.text()).slice(0, 500);
+        if (res.status === 400 && level && /thinking|effort|output_config/i.test(errorText)) {
+            // The model rejected adaptive thinking/effort: extended thinking is the
+            // only mode on Claude 4.5 and earlier. Its budget must be >= 1024 and
+            // strictly below max_tokens, so it needs max_tokens >= 2048.
+            if (cfg.maxTokens < 2048) {
+                throw new HttpError(res.status, `${errorText} — this model rejects adaptive thinking and max_tokens=${cfg.maxTokens} is too small for extended thinking (needs >= 2048 so budget_tokens can be >= 1024 and still leave room for the reply)`);
+            }
+            cfg.log?.('llm: model rejected adaptive thinking; retrying with extended thinking + auto budget');
+            delete body.output_config;
+            body.thinking = { type: 'enabled', budget_tokens: thinkingBudgetTokens(level, cfg.maxTokens) };
+            res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+            if (!res.ok)
+                errorText = (await res.text()).slice(0, 500);
+        }
+        if (!res.ok && cfg.extraBody && Object.keys(cfg.extraBody).length > 0) {
+            // The provider rejected a user-supplied extra param (e.g. thinking with a
+            // temperature other than 1); retry once without it, mirroring openai.ts.
+            cfg.log?.(`llm: provider rejected extra_body (400 ${res.status}), retrying without it`);
+            for (const k of Object.keys(cfg.extraBody))
+                delete body[k];
+            // JSON.stringify is recomputed: extra_body keys are gone from `body`.
+            res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+            if (!res.ok)
+                errorText = (await res.text()).slice(0, 500);
+        }
+        if (!res.ok) {
+            throw new HttpError(res.status, errorText);
+        }
     }
-    const data = (await res.json());
-    try {
-        return anthropic_extractText(data);
+    if (!(res.headers.get('content-type') ?? '').includes('text/event-stream')) {
+        // The endpoint answered with a plain JSON completion: it ignored
+        // `stream: true`, or the user set extra_body {"stream": false} (a
+        // documented escape hatch). Handle it rather than misreporting an empty
+        // stream. Note: long-thinking requests lose streaming's idle protection.
+        cfg.log?.('llm: anthropic response is not SSE (endpoint ignored stream:true); reading the JSON completion');
+        const data = (await res.json());
+        const text = data.content?.find((b) => b.type === 'text')?.text;
+        if (typeof text !== 'string' || text.trim().length === 0) {
+            throw new EmptyCompletionError('provider returned empty completion content');
+        }
+        return text;
     }
-    catch (err) {
-        cfg.log?.(`llm: anthropic extraction failed (${err.message}); raw response: ${excerpt(JSON.stringify(data), 1500)}`);
-        throw err;
+    if (!res.body) {
+        throw new Error('anthropic stream error: 200 response has no body');
     }
+    let text = '';
+    let events = 0;
+    let stopReason;
+    let thinkingSeen = false;
+    for await (const ev of parseSSE(res.body)) {
+        events++;
+        if (ev.event === 'content_block_delta') {
+            let payload;
+            try {
+                payload = JSON.parse(ev.data);
+            }
+            catch {
+                continue; // malformed/truncated line; judge by what accumulated
+            }
+            const delta = payload.delta;
+            if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+                text += delta.text;
+            }
+            else if (delta?.type === 'thinking_delta' &&
+                typeof delta.thinking === 'string' &&
+                delta.thinking.length > 0) {
+                thinkingSeen = true;
+            }
+        }
+        else if (ev.event === 'message_delta') {
+            // Carries the stop reason (e.g. `max_tokens` when a thinking budget ate
+            // the allowance) — the key clue when a completion ends up empty.
+            try {
+                const payload = JSON.parse(ev.data);
+                const reason = payload.delta?.stop_reason;
+                if (stopReason === undefined && typeof reason === 'string' && reason.length > 0) {
+                    stopReason = reason;
+                }
+            }
+            catch {
+                continue; // malformed line; the diagnostic degrades to stop_reason=none
+            }
+        }
+        else if (ev.event === 'error') {
+            // Mid-stream failure on an HTTP 200 (e.g. overloaded_error). Plain
+            // Error, not LLMError, so requestWithRetry treats it as transient.
+            throw new Error(`anthropic stream error: ${ev.data}`);
+        }
+        else if (ev.event === 'message_stop') {
+            break; // terminal; EOF terminates too
+        }
+    }
+    if (text.trim().length === 0) {
+        // See the streaming contract: empty completions are a provider-side
+        // failure mode; log a diagnostic and let the caller re-ask.
+        cfg.log?.(`llm: anthropic extraction failed (empty completion); events=${events} stop_reason=${stopReason ?? 'none'} thinking=${thinkingSeen ? 'yes' : 'no'}`);
+        throw new EmptyCompletionError('provider returned empty completion content');
+    }
+    return text;
 }
 
 ;// CONCATENATED MODULE: ./src/llm/json.ts
@@ -32033,6 +32258,69 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+;// CONCATENATED MODULE: ./src/util/text.ts
+/**
+ * Small text helpers for diagnostics and semantic comparison.
+ */
+/** One-line, newline-escaped, truncated view of arbitrary text for logs. */
+function excerpt(text, max = 600) {
+    const truncated = text.length > max ? `${text.slice(0, max)}…(+${text.length - max} more chars)` : text;
+    return JSON.stringify(truncated);
+}
+/** Common English function words that carry no topical signal. */
+const STOPWORDS = new Set([
+    'a', 'about', 'above', 'after', 'again', 'all', 'also', 'am', 'an', 'and', 'any', 'are',
+    'as', 'at', 'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but',
+    'by', 'can', 'could', 'did', 'do', 'does', 'doing', 'down', 'during', 'each', 'few', 'for',
+    'from', 'further', 'had', 'has', 'have', 'having', 'he', 'her', 'here', 'hers', 'herself',
+    'him', 'himself', 'his', 'how', 'i', 'if', 'in', 'into', 'is', 'it', 'its', 'itself', 'just',
+    'like', 'may', 'me', 'might', 'more', 'most', 'my', 'myself', 'no', 'nor', 'not', 'now', 'of',
+    'off', 'on', 'once', 'only', 'or', 'other', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
+    'same', 'she', 'should', 'so', 'some', 'such', 'than', 'that', 'the', 'their', 'theirs',
+    'them', 'themselves', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'to',
+    'too', 'under', 'until', 'up', 'very', 'was', 'we', 'were', 'what', 'when', 'where', 'which',
+    'while', 'who', 'whom', 'why', 'will', 'with', 'would', 'you', 'your', 'yours', 'yourself',
+    'yourselves', 'make', 'makes', 'made', 'use', 'uses', 'using', 'used', 'add', 'adds',
+    'added', 'need', 'needs', 'ensure', 'instead'
+]);
+/**
+ * Normalize review-comment text into a set of topical tokens: strip severity
+ * emoji and markdown decoration, lowercase, drop stopwords and single chars.
+ * Used to detect when a new finding repeats a previously reported comment.
+ */
+function normalizeTokens(text) {
+    const stripped = text
+        .replace(/[🔴🟠🔵]/g, ' ')
+        // Collapse markdown links [label](url) to the label, dropping the URL.
+        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+        // Strip remaining markdown decoration and stray brackets. Ordinary
+        // parentheses are left intact so parenthetical content (e.g. "CWE-89")
+        // still contributes tokens.
+        .replace(/[*_`#>\[\]]/g, ' ')
+        .toLowerCase();
+    const tokens = new Set();
+    for (const m of stripped.match(/[a-z0-9]+/g) ?? []) {
+        if (m.length > 1 && !STOPWORDS.has(m))
+            tokens.add(m);
+    }
+    return tokens;
+}
+/**
+ * Fraction of the smaller token set that is contained in the larger set.
+ * 1 when one comment is a subset of the other, 0 when they are disjoint.
+ */
+function tokenContainment(a, b) {
+    if (a.size === 0 || b.size === 0)
+        return 0;
+    const smaller = a.size <= b.size ? a : b;
+    const larger = smaller === a ? b : a;
+    let shared = 0;
+    for (const t of smaller)
+        if (larger.has(t))
+            shared++;
+    return shared / smaller.size;
+}
+
 ;// CONCATENATED MODULE: ./src/llm/client.ts
 /**
  * Provider-agnostic LLM client.
@@ -32054,8 +32342,8 @@ function sleep(ms) {
 
 const MAX_HTTP_ATTEMPTS = 3;
 const MAX_PARSE_ATTEMPTS = 2;
-/** Total budget for one LLM request including all HTTP retries and backoff. */
-const TOTAL_TIMEOUT_MS = 5 * 60 * 1000;
+/** Default total budget for one LLM request including all HTTP retries and backoff. */
+const DEFAULT_TOTAL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Resolve the effective provider from an explicit input + base URL. */
 function resolveProvider(input, baseUrl) {
     if (input === 'openai' || input === 'anthropic')
@@ -32078,29 +32366,36 @@ function isRetryable(err) {
 }
 /**
  * One HTTP round-trip with backoff retries; returns the raw reply text.
- * A single deadline is computed up front and each attempt receives the
- * remaining budget, so the total request (all attempts + backoff) cannot
- * exceed `TOTAL_TIMEOUT_MS`.
+ * `deadline` is an absolute epoch-ms timestamp owned by `callLLM` (Infinity =
+ * uncapped), so every attempt AND every retry round — the response_format
+ * compat retry and the JSON re-ask — shares one budget and `timeoutMs` bounds
+ * the whole `callLLM` wall clock.
  */
-async function requestWithRetry(cfg, messages, jsonMode) {
-    const deadline = Date.now() + TOTAL_TIMEOUT_MS;
+async function requestWithRetry(cfg, messages, jsonMode, deadline) {
+    const uncapped = !Number.isFinite(deadline);
     let lastErr;
+    let deadlineAborted = false;
     for (let attempt = 0; attempt < MAX_HTTP_ATTEMPTS; attempt++) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0)
-            break; // total deadline exhausted; give up
+        const remaining = uncapped ? 0 : deadline - Date.now();
+        if (!uncapped && remaining <= 0)
+            break; // deadline exhausted; give up
         try {
             return await chatOnce(cfg, messages, jsonMode, remaining);
         }
         catch (err) {
             lastErr = err;
-            if (isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {
+            // A deadline abort (our AbortSignal fired) is not transient: no budget
+            // remains, so retrying is pointless and the log must not claim it will.
+            deadlineAborted =
+                err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+            if (!deadlineAborted && isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {
                 // Log transient failures (incl. empty completions) so retries are
                 // visible in the workflow log; the reply body is already omitted from
                 // the message to keep it one-line and secret-free.
                 cfg.log?.(`llm: attempt #${attempt + 1} failed (${String(err)}), retrying`);
                 // Never sleep past the deadline: clamp the backoff to the remaining
-                // budget (skipping the sleep entirely when it is exhausted).
+                // budget (skipping the sleep entirely when it is exhausted). Uncapped
+                // requests clamp to Infinity, i.e. never clamp.
                 const wait = Math.min(backoffMs(attempt), deadline - Date.now());
                 if (wait > 0)
                     await sleep(wait);
@@ -32109,11 +32404,12 @@ async function requestWithRetry(cfg, messages, jsonMode) {
             break;
         }
     }
-    if (lastErr === undefined) {
-        // The shared deadline was exhausted before any attempt could start (e.g.
-        // the clock jumped past the deadline between computation and the first
-        // attempt); surface a clear timeout instead of `LLM request failed: undefined`.
-        throw new LLMError(`LLM deadline exceeded after ${TOTAL_TIMEOUT_MS}ms`);
+    if (lastErr === undefined || deadlineAborted) {
+        // Either the shared budget was spent before this attempt could start (an
+        // earlier round consumed it, or the clock jumped past the deadline), or a
+        // per-attempt abort fired because the deadline was reached: both are the
+        // deadline, so surface it instead of a raw TimeoutError.
+        throw new LLMError(`LLM deadline exceeded after ${cfg.timeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS}ms`);
     }
     if (lastErr instanceof HttpError) {
         throw new LLMError(`LLM HTTP ${lastErr.status}: ${lastErr.message}`);
@@ -32133,6 +32429,13 @@ async function requestWithRetry(cfg, messages, jsonMode) {
 async function callLLM(cfg, messages) {
     const jsonMode = cfg.jsonMode ?? 'auto';
     const log = cfg.log ?? (() => { });
+    const totalMs = cfg.timeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
+    // `0` and non-finite budgets are uncapped (`AbortSignal.timeout` throws
+    // RangeError for Infinity/NaN, so a non-finite budget must never produce a
+    // signal). Computed once so EVERY round of this logical call — the HTTP
+    // attempts, the response_format compat retry, and the JSON re-ask — shares
+    // one budget: `timeoutMs` bounds the whole call's wall clock.
+    const deadline = totalMs === 0 || !Number.isFinite(totalMs) ? Infinity : Date.now() + totalMs;
     let msgs = [...messages];
     const rawReplies = [];
     let retriedWithoutFormat = false;
@@ -32141,7 +32444,7 @@ async function callLLM(cfg, messages) {
         const effectiveMode = jsonMode === 'auto' && retriedWithoutFormat ? 'off' : jsonMode;
         let text;
         try {
-            text = await requestWithRetry(cfg, msgs, effectiveMode);
+            text = await requestWithRetry(cfg, msgs, effectiveMode, deadline);
         }
         catch (err) {
             if (!(err instanceof EmptyCompletionError))
@@ -32212,6 +32515,21 @@ function numInput(reader, name, def, parse, min) {
     return value;
 }
 const intInput = (reader, name, def, min = 1) => numInput(reader, name, def, (s) => parseInt(s, 10), min);
+/**
+ * Strict non-negative integer input. Unlike `intInput`, rejects values that
+ * merely truncate to an integer ("0.5" → 0, "-0.5" → -0, "1e3" → 1): for
+ * `timeout`, truncation to 0 would silently mean "uncapped" — the opposite of
+ * the requested cap.
+ */
+function strictIntInput(reader, name, def) {
+    const raw = reader.getInput(name).trim();
+    if (!raw)
+        return def;
+    if (!/^\d+$/.test(raw)) {
+        throw new Error(`invalid input "${name}": "${raw}" is not a non-negative integer`);
+    }
+    return Number(raw);
+}
 /** Split comma/newline separated input into trimmed non-empty patterns. */
 function splitPatterns(value) {
     return value
@@ -32242,6 +32560,21 @@ function loadConfig(reader) {
     if (responseFormatInput !== 'auto' && responseFormatInput !== 'off') {
         throw new Error(`invalid response_format "${responseFormatInput}": expected auto | off`);
     }
+    const thinkingLevels = ['auto', 'off', 'low', 'medium', 'high', 'max'];
+    const thinkingInput = (reader.getInput('thinking') || 'auto').toLowerCase();
+    if (!thinkingLevels.includes(thinkingInput)) {
+        throw new Error(`invalid input "thinking": "${reader.getInput('thinking')}" is not one of ${thinkingLevels.join(' | ')}`);
+    }
+    const provider = resolveProvider(reader.getInput('provider') || 'auto', baseUrl);
+    const temperatureRaw = reader.getInput('temperature');
+    // Anthropic omits temperature unless set explicitly: Claude 4.7+/5.x reject
+    // any non-default value with 400 (thinking or not), and thinking requires the
+    // default on older models. OpenAI-compatible keeps the 0.2 default.
+    const temperature = temperatureRaw !== ''
+        ? numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0)
+        : provider === 'anthropic'
+            ? undefined
+            : 0.2;
     const extraBodyRaw = reader.getInput('extra_body') || '';
     let extraBody = {};
     if (extraBodyRaw.trim()) {
@@ -32256,10 +32589,11 @@ function loadConfig(reader) {
             throw new Error(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
         }
     }
-    else if (/api\.deepseek\.com/i.test(baseUrl) &&
+    else if (thinkingInput === 'auto' &&
+        /api\.deepseek\.com/i.test(baseUrl) &&
         /^deepseek-(?:v4-)?flash(?:$|-)/i.test(model)) {
-        // DeepSeek's API defaults thinking to ENABLED (documented at
-        // https://api-docs.deepseek.com). v4-flash reasoning burned the whole
+        // The retired v4-flash-era API defaulted thinking to ENABLED (documented
+        // at https://api-docs.deepseek.com). v4-flash reasoning burned the whole
         // token budget on reasoning_content for review-sized prompts, so this
         // action used to auto-disable thinking. DeepSeek-V4.1-Flash (model
         // `deepseek-flash`; the retired `deepseek-v4-flash` name routes to it)
@@ -32268,11 +32602,26 @@ function loadConfig(reader) {
         // bounded chain-of-thought without the budget burn (an explicit
         // extra_body always wins, e.g. set
         // {"thinking":{"type":"disabled"}} to opt back out).
-        // Gated to flash models: `thinking`/`reasoning_effort` are V4.1-Flash
-        // controls, and `deepseek-chat` can reject them - injecting them there
-        // would force the compatibility retry in openai.ts (a wasted request plus
-        // latency/rate-limit cost) on every call.
+        // Gated to flash models: the auto-default is a cost/quality decision for
+        // the flash line only. Measured 2026-09-24: `deepseek-chat` does NOT
+        // reason unless a thinking/reasoning_effort control is supplied, and it
+        // accepts both - so other models are left untouched (no silent cost
+        // change); an explicit extra_body turns thinking on for them.
         extraBody = { thinking: { type: 'enabled' }, reasoning_effort: 'low' };
+    }
+    // A direct contradiction between the thinking input and extra_body fails
+    // fast: extra_body is merged last and wins, so `thinking: max` plus a stale
+    // `{"thinking":{"type":"disabled"}}` used to run with thinking silently off.
+    const thinkingObj = extraBody.thinking;
+    const disablesThinking = thinkingObj?.type === 'disabled' || extraBody.reasoning_effort === 'none';
+    const enablesThinking = thinkingObj?.type === 'enabled' || extraBody.reasoning_effort === 'low' ||
+        extraBody.reasoning_effort === 'medium' || extraBody.reasoning_effort === 'high' ||
+        extraBody.reasoning_effort === 'max';
+    if (thinkingInput !== 'auto' && thinkingInput !== 'off' && disablesThinking) {
+        throw new Error(`invalid input "thinking": "${thinkingInput}" conflicts with extra_body, which disables thinking — extra_body is applied last and would win; remove the disabler from extra_body (or set thinking: auto)`);
+    }
+    if (thinkingInput === 'off' && enablesThinking) {
+        throw new Error(`invalid input "thinking": "off" conflicts with extra_body, which enables thinking — remove one of them`);
     }
     return {
         mode: modeInput,
@@ -32280,14 +32629,18 @@ function loadConfig(reader) {
         apiKey,
         baseUrl,
         model,
-        provider: resolveProvider(reader.getInput('provider') || 'auto', baseUrl),
+        provider,
         maxTokens: intInput(reader, 'max_tokens', 8192),
-        temperature: numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0),
+        temperature,
+        thinking: thinkingInput,
         responseFormat: responseFormatInput,
         extraBody,
         exclude: splitPatterns(reader.getInput('exclude')),
         maxFiles: intInput(reader, 'max_files', 40),
         maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
+        // 0 is valid: no client-side deadline (streaming + the idle-stall guard
+        // keep uncapped requests safe; provider limits still apply).
+        timeout: strictIntInput(reader, 'timeout', 300),
         reviewDrafts: toBool(reader.getInput('review_drafts')),
         commentTrigger: reader.getInput('comment_trigger') || '/review',
         failOnError: toBool(reader.getInput('fail_on_error'))
@@ -33245,15 +33598,17 @@ async function main() {
         model: cfg.model,
         maxTokens: cfg.maxTokens,
         temperature: cfg.temperature,
+        thinking: cfg.thinking,
         jsonMode: cfg.responseFormat,
         extraBody: cfg.extraBody,
+        timeoutMs: cfg.timeout * 1000,
         log: (msg) => core.info(`ai-code-review: ${msg}`)
     };
     const endpoint = cfg.provider === 'anthropic' ? buildAnthropicUrl(cfg.baseUrl) : buildOpenAiUrl(cfg.baseUrl);
     const extraBodyLog = cfg.extraBody && Object.keys(cfg.extraBody).length > 0
         ? ` extra_body=${JSON.stringify(cfg.extraBody)}`
         : '';
-    core.info(`ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint}${extraBodyLog}`);
+    core.info(`ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} thinking=${cfg.thinking} endpoint=${endpoint} timeout=${cfg.timeout}s${extraBodyLog}`);
     const llm = (messages) => callLLM(llmCfg, messages);
     let summaryPosted = false;
     let reviewCommentCount = 0;

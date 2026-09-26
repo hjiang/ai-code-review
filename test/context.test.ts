@@ -32,6 +32,7 @@ describe('loadConfig', () => {
     expect(cfg.exclude).toEqual([]);
     expect(cfg.maxFiles).toBe(40);
     expect(cfg.maxPatchChars).toBe(100000);
+    expect(cfg.timeout).toBe(300);
     expect(cfg.reviewDrafts).toBe(false);
     expect(cfg.commentTrigger).toBe('/review');
     expect(cfg.failOnError).toBe(false);
@@ -60,6 +61,90 @@ describe('loadConfig', () => {
     }
     const r = reader({ temperature: '-0.5' });
     expect(() => loadConfig(r)).toThrow('invalid input "temperature"');
+  });
+
+  it('parses timeout in seconds; 0 is valid (uncapped)', () => {
+    expect(loadConfig(reader({ timeout: '900' })).timeout).toBe(900);
+    // 0 disables the client-side deadline entirely (arbitrarily long thinking).
+    expect(loadConfig(reader({ timeout: '0' })).timeout).toBe(0);
+    expect(() => loadConfig(reader({ timeout: '-5' }))).toThrow('invalid input "timeout"');
+    expect(() => loadConfig(reader({ timeout: 'soon' }))).toThrow('invalid input "timeout"');
+  });
+
+  it('rejects timeout values that truncate to 0 (silent uncap)', () => {
+    // parseInt truncation made "0.5" → 0 (uncapped!) and "-0.5" → -0 (not < 0),
+    // i.e. the opposite of the requested cap; only a literal integer is valid.
+    expect(() => loadConfig(reader({ timeout: '0.5' }))).toThrow('invalid input "timeout"');
+    expect(() => loadConfig(reader({ timeout: '-0.5' }))).toThrow('invalid input "timeout"');
+    expect(() => loadConfig(reader({ timeout: '1e3' }))).toThrow('invalid input "timeout"');
+  });
+
+  it('parses the thinking level (default auto) and rejects unknown levels', () => {
+    expect(loadConfig(reader()).thinking).toBe('auto');
+    for (const level of ['off', 'low', 'medium', 'high', 'max']) {
+      expect(loadConfig(reader({ thinking: level })).thinking).toBe(level);
+    }
+    expect(loadConfig(reader({ thinking: 'HIGH' })).thinking).toBe('high');
+    expect(() => loadConfig(reader({ thinking: 'xhigh' }))).toThrow('invalid input "thinking"');
+    expect(() => loadConfig(reader({ thinking: 'lots' }))).toThrow('invalid input "thinking"');
+  });
+
+  it('thinking: off suppresses the DeepSeek flash auto-default', () => {
+    const cfg = loadConfig(
+      reader({
+        api_base_url: 'https://api.deepseek.com',
+        model: 'deepseek-flash',
+        thinking: 'off'
+      })
+    );
+    expect(cfg.thinking).toBe('off');
+    expect(cfg.extraBody).toEqual({});
+  });
+
+  it('keeps an explicit extra_body alongside the thinking level (adapter merges, user wins)', () => {
+    const cfg = loadConfig(
+      reader({ thinking: 'high', extra_body: '{"reasoning_effort":"low"}' })
+    );
+    expect(cfg.thinking).toBe('high');
+    expect(cfg.extraBody).toEqual({ reasoning_effort: 'low' });
+  });
+
+  it('temperature defaults to 0.2 for openai-compatible and stays unset for anthropic', () => {
+    // Claude 4.7+/5.x reject any non-default temperature (400) — omitting it
+    // lets those models run at their default, which is also thinking-compatible.
+    expect(loadConfig(reader()).temperature).toBe(0.2);
+    expect(loadConfig(reader({ provider: 'anthropic' })).temperature).toBeUndefined();
+    expect(loadConfig(reader({ provider: 'anthropic', temperature: '1' })).temperature).toBe(1);
+    expect(loadConfig(reader({ temperature: '0' })).temperature).toBe(0);
+    expect(() => loadConfig(reader({ temperature: 'hot' }))).toThrow('invalid input "temperature"');
+  });
+
+  it('rejects contradictory thinking levels vs extra_body disablers', () => {
+    // A stale extra_body disabler silently won over the thinking input (found
+    // in the wild: `thinking: max` + extra_body thinking.disabled ran with
+    // thinking off), so the direct contradiction fails fast instead.
+    expect(() =>
+      loadConfig(reader({ thinking: 'max', extra_body: '{"thinking":{"type":"disabled"}}' }))
+    ).toThrow(/conflict/i);
+    expect(() =>
+      loadConfig(reader({ thinking: 'high', extra_body: '{"reasoning_effort":"none"}' }))
+    ).toThrow(/conflict/i);
+    expect(() =>
+      loadConfig(reader({ thinking: 'off', extra_body: '{"thinking":{"type":"enabled"}}' }))
+    ).toThrow(/conflict/i);
+    expect(() =>
+      loadConfig(reader({ thinking: 'off', extra_body: '{"reasoning_effort":"low"}' }))
+    ).toThrow(/conflict/i);
+    // Non-contradictory pairings stay allowed: extra_body may refine a level
+    // (e.g. pin a budget) and `auto` defers to extra_body entirely.
+    expect(
+      loadConfig(
+        reader({ thinking: 'high', extra_body: '{"thinking":{"type":"enabled","budget_tokens":20000}}' })
+      ).thinking
+    ).toBe('high');
+    expect(
+      loadConfig(reader({ thinking: 'auto', extra_body: '{"thinking":{"type":"disabled"}}' })).thinking
+    ).toBe('auto');
   });
 
   it('validates the mode value', () => {

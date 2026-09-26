@@ -14,11 +14,13 @@ const cfg: ActionConfig = {
   provider: 'openai',
   maxTokens: 100,
   temperature: 0,
+  thinking: 'auto',
   responseFormat: 'auto',
   extraBody: {},
   exclude: [],
   maxFiles: 40,
   maxPatchChars: 5000,
+  timeout: 300,
   reviewDrafts: false,
   commentTrigger: '/review',
   failOnError: false

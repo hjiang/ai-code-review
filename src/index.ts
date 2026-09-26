@@ -59,8 +59,10 @@ async function main(): Promise<void> {
     model: cfg.model,
     maxTokens: cfg.maxTokens,
     temperature: cfg.temperature,
+    thinking: cfg.thinking,
     jsonMode: cfg.responseFormat,
     extraBody: cfg.extraBody,
+    timeoutMs: cfg.timeout * 1000,
     log: (msg: string) => core.info(`ai-code-review: ${msg}`)
   };
   const endpoint =
@@ -70,7 +72,7 @@ async function main(): Promise<void> {
       ? ` extra_body=${JSON.stringify(cfg.extraBody)}`
       : '';
   core.info(
-    `ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} endpoint=${endpoint}${extraBodyLog}`
+    `ai-code-review: llm provider=${cfg.provider} model=${cfg.model} jsonMode=${llmCfg.jsonMode ?? 'auto'} thinking=${cfg.thinking} endpoint=${endpoint} timeout=${cfg.timeout}s${extraBodyLog}`
   );
   const llm = (messages: LLMMessage[]) => callLLM(llmCfg, messages);
 

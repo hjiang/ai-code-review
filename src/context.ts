@@ -5,7 +5,7 @@
  */
 
 import { resolveProvider } from './llm/client.js';
-import type { Provider } from './llm/types.js';
+import type { Provider, ThinkingLevel } from './llm/types.js';
 
 export type Mode = 'summary' | 'review' | 'both';
 
@@ -19,12 +19,17 @@ export interface ActionConfig {
   model: string;
   provider: Provider;
   maxTokens: number;
-  temperature: number;
+  /** Sampling temperature; unset for Anthropic unless configured explicitly. */
+  temperature?: number;
+  /** Normalized thinking effort (`auto` = provider default). */
+  thinking: ThinkingLevel;
   responseFormat: ResponseFormat;
   extraBody: Record<string, unknown>;
   exclude: string[];
   maxFiles: number;
   maxPatchChars: number;
+  /** Per-LLM-request deadline in seconds (covers retries); 0 = no client-side cap. */
+  timeout: number;
   reviewDrafts: boolean;
   commentTrigger: string;
   failOnError: boolean;
@@ -77,6 +82,21 @@ function numInput(
 const intInput = (reader: InputReader, name: string, def: number, min = 1) =>
   numInput(reader, name, def, (s) => parseInt(s, 10), min);
 
+/**
+ * Strict non-negative integer input. Unlike `intInput`, rejects values that
+ * merely truncate to an integer ("0.5" → 0, "-0.5" → -0, "1e3" → 1): for
+ * `timeout`, truncation to 0 would silently mean "uncapped" — the opposite of
+ * the requested cap.
+ */
+function strictIntInput(reader: InputReader, name: string, def: number): number {
+  const raw = reader.getInput(name).trim();
+  if (!raw) return def;
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`invalid input "${name}": "${raw}" is not a non-negative integer`);
+  }
+  return Number(raw);
+}
+
 /** Split comma/newline separated input into trimmed non-empty patterns. */
 export function splitPatterns(value: string): string[] {
   return value
@@ -107,6 +127,26 @@ export function loadConfig(reader: InputReader): ActionConfig {
     throw new Error(`invalid response_format "${responseFormatInput}": expected auto | off`);
   }
 
+  const thinkingLevels = ['auto', 'off', 'low', 'medium', 'high', 'max'] as const;
+  const thinkingInput = (reader.getInput('thinking') || 'auto').toLowerCase();
+  if (!(thinkingLevels as readonly string[]).includes(thinkingInput)) {
+    throw new Error(
+      `invalid input "thinking": "${reader.getInput('thinking')}" is not one of ${thinkingLevels.join(' | ')}`
+    );
+  }
+
+  const provider = resolveProvider(reader.getInput('provider') || 'auto', baseUrl);
+  const temperatureRaw = reader.getInput('temperature');
+  // Anthropic omits temperature unless set explicitly: Claude 4.7+/5.x reject
+  // any non-default value with 400 (thinking or not), and thinking requires the
+  // default on older models. OpenAI-compatible keeps the 0.2 default.
+  const temperature =
+    temperatureRaw !== ''
+      ? numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0)
+      : provider === 'anthropic'
+        ? undefined
+        : 0.2;
+
   const extraBodyRaw = reader.getInput('extra_body') || '';
   let extraBody: Record<string, unknown> = {};
   if (extraBodyRaw.trim()) {
@@ -120,11 +160,12 @@ export function loadConfig(reader: InputReader): ActionConfig {
       throw new Error(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
     }
   } else if (
+    thinkingInput === 'auto' &&
     /api\.deepseek\.com/i.test(baseUrl) &&
     /^deepseek-(?:v4-)?flash(?:$|-)/i.test(model)
   ) {
-    // DeepSeek's API defaults thinking to ENABLED (documented at
-    // https://api-docs.deepseek.com). v4-flash reasoning burned the whole
+    // The retired v4-flash-era API defaulted thinking to ENABLED (documented
+    // at https://api-docs.deepseek.com). v4-flash reasoning burned the whole
     // token budget on reasoning_content for review-sized prompts, so this
     // action used to auto-disable thinking. DeepSeek-V4.1-Flash (model
     // `deepseek-flash`; the retired `deepseek-v4-flash` name routes to it)
@@ -133,11 +174,32 @@ export function loadConfig(reader: InputReader): ActionConfig {
     // bounded chain-of-thought without the budget burn (an explicit
     // extra_body always wins, e.g. set
     // {"thinking":{"type":"disabled"}} to opt back out).
-    // Gated to flash models: `thinking`/`reasoning_effort` are V4.1-Flash
-    // controls, and `deepseek-chat` can reject them - injecting them there
-    // would force the compatibility retry in openai.ts (a wasted request plus
-    // latency/rate-limit cost) on every call.
+    // Gated to flash models: the auto-default is a cost/quality decision for
+    // the flash line only. Measured 2026-09-24: `deepseek-chat` does NOT
+    // reason unless a thinking/reasoning_effort control is supplied, and it
+    // accepts both - so other models are left untouched (no silent cost
+    // change); an explicit extra_body turns thinking on for them.
     extraBody = { thinking: { type: 'enabled' }, reasoning_effort: 'low' };
+  }
+
+  // A direct contradiction between the thinking input and extra_body fails
+  // fast: extra_body is merged last and wins, so `thinking: max` plus a stale
+  // `{"thinking":{"type":"disabled"}}` used to run with thinking silently off.
+  const thinkingObj = extraBody.thinking as { type?: unknown } | undefined;
+  const disablesThinking = thinkingObj?.type === 'disabled' || extraBody.reasoning_effort === 'none';
+  const enablesThinking =
+    thinkingObj?.type === 'enabled' || extraBody.reasoning_effort === 'low' ||
+    extraBody.reasoning_effort === 'medium' || extraBody.reasoning_effort === 'high' ||
+    extraBody.reasoning_effort === 'max';
+  if (thinkingInput !== 'auto' && thinkingInput !== 'off' && disablesThinking) {
+    throw new Error(
+      `invalid input "thinking": "${thinkingInput}" conflicts with extra_body, which disables thinking — extra_body is applied last and would win; remove the disabler from extra_body (or set thinking: auto)`
+    );
+  }
+  if (thinkingInput === 'off' && enablesThinking) {
+    throw new Error(
+      `invalid input "thinking": "off" conflicts with extra_body, which enables thinking — remove one of them`
+    );
   }
 
   return {
@@ -146,14 +208,18 @@ export function loadConfig(reader: InputReader): ActionConfig {
     apiKey,
     baseUrl,
     model,
-    provider: resolveProvider(reader.getInput('provider') || 'auto', baseUrl),
+    provider,
     maxTokens: intInput(reader, 'max_tokens', 8192),
-    temperature: numInput(reader, 'temperature', 0.2, (s) => parseFloat(s), 0),
+    temperature,
+    thinking: thinkingInput as ThinkingLevel,
     responseFormat: responseFormatInput as ResponseFormat,
     extraBody,
     exclude: splitPatterns(reader.getInput('exclude')),
     maxFiles: intInput(reader, 'max_files', 40),
     maxPatchChars: intInput(reader, 'max_patch_chars', 100000),
+    // 0 is valid: no client-side deadline (streaming + the idle-stall guard
+    // keep uncapped requests safe; provider limits still apply).
+    timeout: strictIntInput(reader, 'timeout', 300),
     reviewDrafts: toBool(reader.getInput('review_drafts')),
     commentTrigger: reader.getInput('comment_trigger') || '/review',
     failOnError: toBool(reader.getInput('fail_on_error'))

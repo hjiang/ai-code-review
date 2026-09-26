@@ -30,7 +30,7 @@ npm run build       # ncc bundle src/index.ts -> dist/index.js
 action.yml              # action metadata (inputs/outputs)
 src/index.ts            # entry: mode dispatch, top-level error handling
 src/{context,diff,filter,review,summarize,prompt}.ts
-src/llm/                # client (retry/timeout), openai, anthropic, json
+src/llm/                # client (retry/timeout), openai, anthropic, sse, json
 src/github/             # comments, reviews, threads, identity (Octokit)
 src/util/               # glob, retry, text
 test/                   # vitest specs mirroring src/ (mocked fetch + @actions/github)
@@ -48,5 +48,11 @@ docs/                   # REQUIREMENTS.md, ARCHITECTURE.md, plans/
   own comment; skip if found. Respect resolved threads (repeat guard).
 - The action must not fail the user's workflow unless `fail_on_error: true`.
 - LLM responses are manually validated (no Zod); bad findings logged + dropped.
+- Capability claims in user-facing docs ("unbounded", "unlimited", "always")
+  must be verified against provider/external-service limits before landing —
+  name the binding constraint explicitly (e.g. Anthropic cuts non-streaming
+  requests at the ~10-minute class; long requests require streaming).
+- LLM requests stream via SSE (`src/llm/sse.ts`, idle-stall guard); `timeout: 0`
+  removes only our cap, not the provider's limit.
 - TDD: write failing test → implement → refactor, including for small fixes.
 - Plans live in `docs/plans/NNN-<name>.md`.

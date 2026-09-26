@@ -22,8 +22,8 @@ export { LLMError } from './types.js';
 
 const MAX_HTTP_ATTEMPTS = 3;
 const MAX_PARSE_ATTEMPTS = 2;
-/** Total budget for one LLM request including all HTTP retries and backoff. */
-const TOTAL_TIMEOUT_MS = 5 * 60 * 1000;
+/** Default total budget for one LLM request including all HTTP retries and backoff. */
+const DEFAULT_TOTAL_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Resolve the effective provider from an explicit input + base URL. */
 export function resolveProvider(input: string | undefined, baseUrl: string): Provider {
@@ -51,31 +51,39 @@ function isRetryable(err: unknown): boolean {
 
 /**
  * One HTTP round-trip with backoff retries; returns the raw reply text.
- * A single deadline is computed up front and each attempt receives the
- * remaining budget, so the total request (all attempts + backoff) cannot
- * exceed `TOTAL_TIMEOUT_MS`.
+ * `deadline` is an absolute epoch-ms timestamp owned by `callLLM` (Infinity =
+ * uncapped), so every attempt AND every retry round — the response_format
+ * compat retry and the JSON re-ask — shares one budget and `timeoutMs` bounds
+ * the whole `callLLM` wall clock.
  */
 async function requestWithRetry(
   cfg: LLMConfig,
   messages: LLMMessage[],
-  jsonMode: 'auto' | 'off'
+  jsonMode: 'auto' | 'off',
+  deadline: number
 ): Promise<string> {
-  const deadline = Date.now() + TOTAL_TIMEOUT_MS;
+  const uncapped = !Number.isFinite(deadline);
   let lastErr: unknown;
+  let deadlineAborted = false;
   for (let attempt = 0; attempt < MAX_HTTP_ATTEMPTS; attempt++) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) break; // total deadline exhausted; give up
+    const remaining = uncapped ? 0 : deadline - Date.now();
+    if (!uncapped && remaining <= 0) break; // deadline exhausted; give up
     try {
       return await chatOnce(cfg, messages, jsonMode, remaining);
     } catch (err) {
       lastErr = err;
-      if (isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {
+      // A deadline abort (our AbortSignal fired) is not transient: no budget
+      // remains, so retrying is pointless and the log must not claim it will.
+      deadlineAborted =
+        err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+      if (!deadlineAborted && isRetryable(err) && attempt < MAX_HTTP_ATTEMPTS - 1) {
         // Log transient failures (incl. empty completions) so retries are
         // visible in the workflow log; the reply body is already omitted from
         // the message to keep it one-line and secret-free.
         cfg.log?.(`llm: attempt #${attempt + 1} failed (${String(err)}), retrying`);
         // Never sleep past the deadline: clamp the backoff to the remaining
-        // budget (skipping the sleep entirely when it is exhausted).
+        // budget (skipping the sleep entirely when it is exhausted). Uncapped
+        // requests clamp to Infinity, i.e. never clamp.
         const wait = Math.min(backoffMs(attempt), deadline - Date.now());
         if (wait > 0) await sleep(wait);
         continue;
@@ -83,11 +91,14 @@ async function requestWithRetry(
       break;
     }
   }
-  if (lastErr === undefined) {
-    // The shared deadline was exhausted before any attempt could start (e.g.
-    // the clock jumped past the deadline between computation and the first
-    // attempt); surface a clear timeout instead of `LLM request failed: undefined`.
-    throw new LLMError(`LLM deadline exceeded after ${TOTAL_TIMEOUT_MS}ms`);
+  if (lastErr === undefined || deadlineAborted) {
+    // Either the shared budget was spent before this attempt could start (an
+    // earlier round consumed it, or the clock jumped past the deadline), or a
+    // per-attempt abort fired because the deadline was reached: both are the
+    // deadline, so surface it instead of a raw TimeoutError.
+    throw new LLMError(
+      `LLM deadline exceeded after ${cfg.timeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS}ms`
+    );
   }
   if (lastErr instanceof HttpError) {
     throw new LLMError(`LLM HTTP ${lastErr.status}: ${lastErr.message}`);
@@ -108,6 +119,14 @@ async function requestWithRetry(
 export async function callLLM(cfg: LLMConfig, messages: LLMMessage[]): Promise<unknown> {
   const jsonMode = cfg.jsonMode ?? 'auto';
   const log = cfg.log ?? (() => {});
+  const totalMs = cfg.timeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
+  // `0` and non-finite budgets are uncapped (`AbortSignal.timeout` throws
+  // RangeError for Infinity/NaN, so a non-finite budget must never produce a
+  // signal). Computed once so EVERY round of this logical call — the HTTP
+  // attempts, the response_format compat retry, and the JSON re-ask — shares
+  // one budget: `timeoutMs` bounds the whole call's wall clock.
+  const deadline =
+    totalMs === 0 || !Number.isFinite(totalMs) ? Infinity : Date.now() + totalMs;
   let msgs = [...messages];
   const rawReplies: string[] = [];
   let retriedWithoutFormat = false;
@@ -116,7 +135,7 @@ export async function callLLM(cfg: LLMConfig, messages: LLMMessage[]): Promise<u
     const effectiveMode = jsonMode === 'auto' && retriedWithoutFormat ? 'off' : jsonMode;
     let text: string;
     try {
-      text = await requestWithRetry(cfg, msgs, effectiveMode);
+      text = await requestWithRetry(cfg, msgs, effectiveMode, deadline);
     } catch (err) {
       if (!(err instanceof EmptyCompletionError)) throw err;
       if (jsonMode === 'auto' && cfg.provider === 'openai' && !retriedWithoutFormat) {

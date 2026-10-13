@@ -99,7 +99,7 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
 | `max_files` | no | `40` | Files per review run |
 | `max_patch_chars` | no | `100000` | Diff chars sent to the LLM per chunk (also the per-file cap) |
 | `review_drafts` | no | `false` | Review draft PRs |
-| `fail_on_error` | no | `false` | Fail the workflow if the action errors |
+| `fail_on_error` | no | `false` | Fail the workflow on review/LLM errors (invalid inputs always fail) |
 
 ## Outputs
 
@@ -108,7 +108,9 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
 ## Quality attributes
 
 - Deterministic and idempotent where specified; never double-post a summary.
-- Never crash the workflow by default (`fail_on_error: false` → log + exit 0).
+- Never crash the workflow by default (`fail_on_error: false` → log + exit 0
+  for review/LLM failures; invalid/missing inputs always fail — a
+  misconfigured workflow must not report success).
 - Cost-conscious: caps on patch size, file count, retries.
 - Fast: single LLM call per chunk; no per-file round trips.
 

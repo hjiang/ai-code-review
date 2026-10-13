@@ -1,12 +1,13 @@
 /**
  * Action entry point: load config + context, build the Octokit and LLM
- * closures, dispatch to the requested modes, and set outputs. Top-level error
- * handling never fails the workflow unless `fail_on_error` is set.
+ * closures, dispatch to the requested modes, and set outputs. Review/LLM
+ * failures never fail the workflow unless `fail_on_error` is set; config
+ * errors (invalid or missing inputs) always do.
  */
 
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { loadConfig, loadContext } from './context.js';
+import { loadConfig, loadContext, exitCodeFor } from './context.js';
 import type { ActionConfig, InputReader } from './context.js';
 import { getPr, getRepo } from './github/reviews.js';
 import { resolveBotLogin } from './github/identity.js';
@@ -109,5 +110,5 @@ main().catch((err) => {
   core.setOutput('summary_posted', 'false');
   core.setOutput('review_comment_count', '0');
   core.setOutput('files_reviewed', '0');
-  process.exitCode = cfg?.failOnError ? 1 : 0;
+  process.exitCode = exitCodeFor(err, cfg?.failOnError);
 });

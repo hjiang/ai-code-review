@@ -11,6 +11,20 @@ export type Mode = 'summary' | 'review' | 'both';
 
 export type ResponseFormat = 'auto' | 'off';
 
+/** A workflow misconfiguration (invalid/missing input). */
+export class ConfigError extends Error {}
+
+/**
+ * Process exit code for a caught top-level error. Config errors fail the
+ * workflow unconditionally: `fail_on_error` gates review/LLM failures, and
+ * the config (including `fail_on_error` itself) may be what failed to parse.
+ * Post: returns 1 or 0, never throws.
+ */
+export function exitCodeFor(err: unknown, failOnError: boolean | undefined): 0 | 1 {
+  if (err instanceof ConfigError) return 1;
+  return failOnError ? 1 : 0;
+}
+
 export interface ActionConfig {
   mode: Mode;
   githubToken: string;
@@ -74,7 +88,7 @@ function numInput(
   if (!raw) return def;
   const value = parse(raw);
   if (!Number.isFinite(value) || value < min) {
-    throw new Error(`invalid input "${name}": "${raw}" is not a valid number >= ${min}`);
+    throw new ConfigError(`invalid input "${name}": "${raw}" is not a valid number >= ${min}`);
   }
   return value;
 }
@@ -92,7 +106,7 @@ function strictIntInput(reader: InputReader, name: string, def: number): number 
   const raw = reader.getInput(name).trim();
   if (!raw) return def;
   if (!/^\d+$/.test(raw)) {
-    throw new Error(`invalid input "${name}": "${raw}" is not a non-negative integer`);
+    throw new ConfigError(`invalid input "${name}": "${raw}" is not a non-negative integer`);
   }
   return Number(raw);
 }
@@ -111,26 +125,26 @@ export function loadConfig(reader: InputReader): ActionConfig {
   const baseUrl = reader.getInput('api_base_url');
   const model = reader.getInput('model');
   const githubToken = reader.getInput('github_token');
-  if (!apiKey) throw new Error('required input "api_key" is missing');
-  if (!baseUrl) throw new Error('required input "api_base_url" is missing');
-  if (!model) throw new Error('required input "model" is missing');
-  if (!githubToken) throw new Error('required input "github_token" is missing');
+  if (!apiKey) throw new ConfigError('required input "api_key" is missing');
+  if (!baseUrl) throw new ConfigError('required input "api_base_url" is missing');
+  if (!model) throw new ConfigError('required input "model" is missing');
+  if (!githubToken) throw new ConfigError('required input "github_token" is missing');
   reader.setSecret(apiKey);
 
   const modeInput = (reader.getInput('mode') || 'review').toLowerCase();
   if (modeInput !== 'summary' && modeInput !== 'review' && modeInput !== 'both') {
-    throw new Error(`invalid mode "${modeInput}": expected summary | review | both`);
+    throw new ConfigError(`invalid mode "${modeInput}": expected summary | review | both`);
   }
 
   const responseFormatInput = (reader.getInput('response_format') || 'auto').toLowerCase();
   if (responseFormatInput !== 'auto' && responseFormatInput !== 'off') {
-    throw new Error(`invalid response_format "${responseFormatInput}": expected auto | off`);
+    throw new ConfigError(`invalid response_format "${responseFormatInput}": expected auto | off`);
   }
 
   const thinkingLevels = ['auto', 'off', 'low', 'medium', 'high', 'max'] as const;
   const thinkingInput = (reader.getInput('thinking') || 'auto').toLowerCase();
   if (!(thinkingLevels as readonly string[]).includes(thinkingInput)) {
-    throw new Error(
+    throw new ConfigError(
       `invalid input "thinking": "${reader.getInput('thinking')}" is not one of ${thinkingLevels.join(' | ')}`
     );
   }
@@ -153,11 +167,11 @@ export function loadConfig(reader: InputReader): ActionConfig {
     try {
       const parsed = JSON.parse(extraBodyRaw);
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error('not a JSON object');
+        throw new ConfigError('not a JSON object');
       }
       extraBody = parsed as Record<string, unknown>;
     } catch {
-      throw new Error(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
+      throw new ConfigError(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
     }
   } else if (
     thinkingInput === 'auto' &&
@@ -192,12 +206,12 @@ export function loadConfig(reader: InputReader): ActionConfig {
     extraBody.reasoning_effort === 'medium' || extraBody.reasoning_effort === 'high' ||
     extraBody.reasoning_effort === 'max';
   if (thinkingInput !== 'auto' && thinkingInput !== 'off' && disablesThinking) {
-    throw new Error(
+    throw new ConfigError(
       `invalid input "thinking": "${thinkingInput}" conflicts with extra_body, which disables thinking — extra_body is applied last and would win; remove the disabler from extra_body (or set thinking: auto)`
     );
   }
   if (thinkingInput === 'off' && enablesThinking) {
-    throw new Error(
+    throw new ConfigError(
       `invalid input "thinking": "off" conflicts with extra_body, which enables thinking — remove one of them`
     );
   }

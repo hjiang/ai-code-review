@@ -32497,6 +32497,20 @@ async function callLLM(cfg, messages) {
  * without mocking @actions/core or @actions/github.
  */
 
+/** A workflow misconfiguration (invalid/missing input). */
+class ConfigError extends Error {
+}
+/**
+ * Process exit code for a caught top-level error. Config errors fail the
+ * workflow unconditionally: `fail_on_error` gates review/LLM failures, and
+ * the config (including `fail_on_error` itself) may be what failed to parse.
+ * Post: returns 1 or 0, never throws.
+ */
+function exitCodeFor(err, failOnError) {
+    if (err instanceof ConfigError)
+        return 1;
+    return failOnError ? 1 : 0;
+}
 function toBool(value) {
     return value.toLowerCase() === 'true';
 }
@@ -32512,7 +32526,7 @@ function numInput(reader, name, def, parse, min) {
         return def;
     const value = parse(raw);
     if (!Number.isFinite(value) || value < min) {
-        throw new Error(`invalid input "${name}": "${raw}" is not a valid number >= ${min}`);
+        throw new ConfigError(`invalid input "${name}": "${raw}" is not a valid number >= ${min}`);
     }
     return value;
 }
@@ -32528,7 +32542,7 @@ function strictIntInput(reader, name, def) {
     if (!raw)
         return def;
     if (!/^\d+$/.test(raw)) {
-        throw new Error(`invalid input "${name}": "${raw}" is not a non-negative integer`);
+        throw new ConfigError(`invalid input "${name}": "${raw}" is not a non-negative integer`);
     }
     return Number(raw);
 }
@@ -32546,26 +32560,26 @@ function loadConfig(reader) {
     const model = reader.getInput('model');
     const githubToken = reader.getInput('github_token');
     if (!apiKey)
-        throw new Error('required input "api_key" is missing');
+        throw new ConfigError('required input "api_key" is missing');
     if (!baseUrl)
-        throw new Error('required input "api_base_url" is missing');
+        throw new ConfigError('required input "api_base_url" is missing');
     if (!model)
-        throw new Error('required input "model" is missing');
+        throw new ConfigError('required input "model" is missing');
     if (!githubToken)
-        throw new Error('required input "github_token" is missing');
+        throw new ConfigError('required input "github_token" is missing');
     reader.setSecret(apiKey);
     const modeInput = (reader.getInput('mode') || 'review').toLowerCase();
     if (modeInput !== 'summary' && modeInput !== 'review' && modeInput !== 'both') {
-        throw new Error(`invalid mode "${modeInput}": expected summary | review | both`);
+        throw new ConfigError(`invalid mode "${modeInput}": expected summary | review | both`);
     }
     const responseFormatInput = (reader.getInput('response_format') || 'auto').toLowerCase();
     if (responseFormatInput !== 'auto' && responseFormatInput !== 'off') {
-        throw new Error(`invalid response_format "${responseFormatInput}": expected auto | off`);
+        throw new ConfigError(`invalid response_format "${responseFormatInput}": expected auto | off`);
     }
     const thinkingLevels = ['auto', 'off', 'low', 'medium', 'high', 'max'];
     const thinkingInput = (reader.getInput('thinking') || 'auto').toLowerCase();
     if (!thinkingLevels.includes(thinkingInput)) {
-        throw new Error(`invalid input "thinking": "${reader.getInput('thinking')}" is not one of ${thinkingLevels.join(' | ')}`);
+        throw new ConfigError(`invalid input "thinking": "${reader.getInput('thinking')}" is not one of ${thinkingLevels.join(' | ')}`);
     }
     const provider = resolveProvider(reader.getInput('provider') || 'auto', baseUrl);
     const temperatureRaw = reader.getInput('temperature');
@@ -32583,12 +32597,12 @@ function loadConfig(reader) {
         try {
             const parsed = JSON.parse(extraBodyRaw);
             if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-                throw new Error('not a JSON object');
+                throw new ConfigError('not a JSON object');
             }
             extraBody = parsed;
         }
         catch {
-            throw new Error(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
+            throw new ConfigError(`invalid input "extra_body": "${extraBodyRaw}" is not a valid JSON object`);
         }
     }
     else if (thinkingInput === 'auto' &&
@@ -32620,10 +32634,10 @@ function loadConfig(reader) {
         extraBody.reasoning_effort === 'medium' || extraBody.reasoning_effort === 'high' ||
         extraBody.reasoning_effort === 'max';
     if (thinkingInput !== 'auto' && thinkingInput !== 'off' && disablesThinking) {
-        throw new Error(`invalid input "thinking": "${thinkingInput}" conflicts with extra_body, which disables thinking — extra_body is applied last and would win; remove the disabler from extra_body (or set thinking: auto)`);
+        throw new ConfigError(`invalid input "thinking": "${thinkingInput}" conflicts with extra_body, which disables thinking — extra_body is applied last and would win; remove the disabler from extra_body (or set thinking: auto)`);
     }
     if (thinkingInput === 'off' && enablesThinking) {
-        throw new Error(`invalid input "thinking": "off" conflicts with extra_body, which enables thinking — remove one of them`);
+        throw new ConfigError(`invalid input "thinking": "off" conflicts with extra_body, which enables thinking — remove one of them`);
     }
     return {
         mode: modeInput,
@@ -33562,8 +33576,9 @@ async function runSummary(cfg, ctx, prInfo, repoInfo, deps) {
 ;// CONCATENATED MODULE: ./src/index.ts
 /**
  * Action entry point: load config + context, build the Octokit and LLM
- * closures, dispatch to the requested modes, and set outputs. Top-level error
- * handling never fails the workflow unless `fail_on_error` is set.
+ * closures, dispatch to the requested modes, and set outputs. Review/LLM
+ * failures never fail the workflow unless `fail_on_error` is set; config
+ * errors (invalid or missing inputs) always do.
  */
 
 
@@ -33638,6 +33653,6 @@ main().catch((err) => {
     core.setOutput('summary_posted', 'false');
     core.setOutput('review_comment_count', '0');
     core.setOutput('files_reviewed', '0');
-    process.exitCode = cfg?.failOnError ? 1 : 0;
+    process.exitCode = exitCodeFor(err, cfg?.failOnError);
 });
 

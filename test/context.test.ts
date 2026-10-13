@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadConfig, loadContext } from '../src/context.js';
+import { ConfigError, exitCodeFor, loadConfig, loadContext } from '../src/context.js';
 import type { InputReader } from '../src/context.js';
 
 function reader(over: Record<string, string> = {}): InputReader {
@@ -43,6 +43,12 @@ describe('loadConfig', () => {
       const r = reader({ [missing]: '' });
       expect(() => loadConfig(r)).toThrow(missing);
     }
+  });
+
+  it('throws ConfigError for validation failures', () => {
+    // The entrypoint keys unconditional workflow failure off this type.
+    const r = reader({ thinking: 'midium' });
+    expect(() => loadConfig(r)).toThrow(ConfigError);
   });
 
   it('throws a clear error for non-numeric numeric inputs', () => {
@@ -352,5 +358,21 @@ describe('loadContext', () => {
 
   it('throws on workflow_dispatch without a valid pr_number', () => {
     expect(() => loadContext('workflow_dispatch', basePayload, reader(), 'github-actions[bot]')).toThrow(/pr_number/i);
+  });
+});
+
+describe('exitCodeFor', () => {
+  // Regression: a typo'd input used to log ##[error] and still exit 0, because
+  // the config (including fail_on_error) had not parsed when the catch ran.
+  it('fails unconditionally on config errors', () => {
+    expect(exitCodeFor(new ConfigError('bad input'), true)).toBe(1);
+    expect(exitCodeFor(new ConfigError('bad input'), false)).toBe(1);
+    expect(exitCodeFor(new ConfigError('bad input'), undefined)).toBe(1);
+  });
+
+  it('gates other failures on fail_on_error', () => {
+    expect(exitCodeFor(new Error('llm exploded'), true)).toBe(1);
+    expect(exitCodeFor(new Error('llm exploded'), false)).toBe(0);
+    expect(exitCodeFor(new Error('llm exploded'), undefined)).toBe(0);
   });
 });

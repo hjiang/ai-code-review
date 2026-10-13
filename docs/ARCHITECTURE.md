@@ -179,4 +179,7 @@ in the example workflows to avoid racing duplicate posts.
 ## Failure policy
 
 Top-level try/catch in `index.ts`: on any error, `core.error` + set outputs to
-`0`/`false`; exit code 1 only when `fail_on_error: true`.
+`0`/`false`. Review/LLM failures exit 1 only when `fail_on_error: true`;
+`ConfigError` (invalid/missing inputs from `loadConfig`) exits 1
+unconditionally via `exitCodeFor` — the config may itself be what failed to
+parse, so `fail_on_error` cannot be trusted there.

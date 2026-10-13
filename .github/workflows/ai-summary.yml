@@ -13,7 +13,7 @@ jobs:
   summary:
     runs-on: ubuntu-latest # change to your self-hosted label, e.g. runs-on: [self-hosted, linux]
     steps:
-      - uses: actions/checkout@v4 # required to resolve the local action
+      - uses: actions/checkout@v7 # required to resolve the local action
       - uses: actions/setup-node@v4 # pin Node on self-hosted runners
         with:
           node-version: 24

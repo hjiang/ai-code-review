@@ -59,7 +59,9 @@ export async function openaiChat(
   const body: Record<string, unknown> = {
     model: cfg.model,
     messages,
-    max_tokens: cfg.maxTokens,
+    // No client-side completion cap: reasoning models spend a small budget on
+    // `reasoning_content` and truncate before emitting any reply. The provider
+    // default governs; a cap can be opted back in via extraBody keys (below).
     // Set before the extraBody merge: a user-supplied `stream: false` wins.
     stream: true
   };

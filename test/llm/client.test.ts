@@ -69,7 +69,8 @@ describe('callLLM — openai adapter', () => {
     expect((init.headers as Record<string, string>)['content-type']).toBe('application/json');
     const body = jsonBody(init);
     expect(body.model).toBe('gpt-test');
-    expect(body.max_tokens).toBe(8192);
+    // No client-side cap: the provider default governs generation length.
+    expect(body.max_tokens).toBeUndefined();
     expect(body.temperature).toBe(0.2);
     expect(body.response_format).toEqual({ type: 'json_object' });
     expect(body.messages).toEqual([{ role: 'user', content: 'hi' }]);
@@ -99,13 +100,13 @@ describe('callLLM — openai adapter', () => {
     const fetchMock = vi.fn().mockResolvedValue(openAiOk('{"ok":1}'));
     vi.stubGlobal('fetch', fetchMock);
     await callLLM(
-      { ...baseCfg, extraBody: { thinking: { type: 'disabled' }, temperature: 0.9 } },
+      { ...baseCfg, extraBody: { thinking: { type: 'disabled' }, temperature: 0.9, max_tokens: 4096 } },
       [{ role: 'user', content: 'hi' }]
     );
     const body = jsonBody(fetchMock.mock.calls[0][1]);
     expect(body.thinking).toEqual({ type: 'disabled' });
     expect(body.temperature).toBe(0.9); // user value overrides the default 0.2
-    expect(body.max_tokens).toBe(8192);
+    expect(body.max_tokens).toBe(4096); // cap opt-in via extra_body
   });
 
   it('retries once without extra_body when the provider rejects it with 400', async () => {

@@ -142,6 +142,9 @@ appear as separate reviews - the natural "multiple times per PR" behavior.
     non-default value with a 400).
   - Post: the level is mapped to provider parameters — OpenAI-compatible:
     `reasoning_effort` (`off` → `thinking: disabled` on DeepSeek base URLs);
+    the request carries no `max_tokens` (reasoning tokens share the completion
+    budget, so a small client cap truncates before any reply text — the
+    provider default governs; `extraBody` can set one);
     Anthropic: `thinking: adaptive` + `output_config.effort`, failing over
     once to `thinking: enabled` with
     `budget_tokens = clamp(max_tokens × {low .2, medium .35, high .5, max .7},

@@ -12,6 +12,13 @@ export interface LLMConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /**
+   * Completion budget in tokens. Consumed only by the Anthropic adapter
+   * (the Messages API requires `max_tokens`, and legacy extended thinking
+   * derives its budget from it). OpenAI-compatible requests are sent with
+   * no cap: reasoning tokens share the completion budget, so a small client
+   * cap truncates before any reply text; the provider default governs.
+   */
   maxTokens: number;
   /**
    * Sampling temperature. Omitted from the request when undefined (Anthropic:

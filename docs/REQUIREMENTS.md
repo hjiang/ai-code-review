@@ -72,7 +72,10 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
   5 minutes is treated as stalled (retryable).
 - FR-P6: `thinking` levels (`auto | off | low | medium | high | max`) are
   normalized and mapped per provider: DeepSeek/OpenAI-compatible send
-  `reasoning_effort` (`off` = DeepSeek `thinking: disabled`); Anthropic sends
+  `reasoning_effort` (`off` = DeepSeek `thinking: disabled`) and no
+  `max_tokens` — reasoning shares the completion budget, so the provider
+  default governs (a client cap would truncate before any reply text);
+  Anthropic sends
   adaptive thinking + `output_config.effort` on 4.6+/5.x and fails over once
   to extended thinking (`budget_tokens` derived from `max_tokens`) on models
   that reject it. `temperature` is omitted when unset (Anthropic default),
@@ -88,7 +91,7 @@ A GitHub Action that mimics GitHub Copilot's code review features, but works wit
 | `api_key` | yes | — | Secret |
 | `model` | yes | — | e.g. `deepseek-chat`, `claude-sonnet-4-5` |
 | `provider` | no | `auto` | `openai` \| `anthropic` \| `auto` |
-| `max_tokens` | no | `8192` | Completion budget (thinking counts against it) |
+| `max_tokens` | no | `8192` | Anthropic completion budget (the Messages API requires it; legacy thinking derives from it). OpenAI-style requests send no cap — provider default governs; `extra_body` can set one |
 | `temperature` | no | — | `0.2` for OpenAI-compatible; unset for Anthropic (4.7+/5.x reject non-default values) |
 | `thinking` | no | `auto` | `auto` \| `off` \| `low` \| `medium` \| `high` \| `max` — normalized effort, mapped per provider (FR-P6) |
 | `timeout` | no | `300` | Deadline in seconds for the whole LLM call (incl. retries and re-asks); `0` = no client-side cap |

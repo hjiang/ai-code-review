@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4 # required to resolve the local action
       - uses: actions/setup-node@v4 # pin Node on self-hosted runners
         with:
-          node-version: 24
+          node-version: 26
       - uses: ./
         with:
           mode: summary
